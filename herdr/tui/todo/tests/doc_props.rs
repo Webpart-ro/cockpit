@@ -64,10 +64,12 @@ proptest! {
         if let (Some(item), true) = (&touched, matches!(op, 1..=3)) {
             let raw = before.lines()[item.line].clone();
             kept.remove(kept.iter().position(|l| *l == raw).unwrap());
+            // A rewritten line keeps the CRLF ending it had.
+            let cr = if raw.ends_with('\r') { "\r" } else { "" };
             let written = match op {
-                1 if item.done => Some(format!("- [ ] {}", undated(&item.text))),
-                1 => Some(format!("- [x] {} (done 2026-10-28)", undated(&item.text))),
-                2 => Some(format!("- [{}] {new}", if item.done { "x" } else { " " })),
+                1 if item.done => Some(format!("- [ ] {}{cr}", undated(&item.text))),
+                1 => Some(format!("- [x] {} (done 2026-10-28){cr}", undated(&item.text))),
+                2 => Some(format!("- [{}] {new}{cr}", if item.done { "x" } else { " " })),
                 _ => None,
             };
             if let Some(raw) = written {
@@ -77,7 +79,9 @@ proptest! {
             }
         }
         if op == 0 {
-            now.remove(now.iter().position(|l| *l == format!("- [ ] {new}")).unwrap());
+            // A new line takes CRLF when the file has any.
+            let cr = if before.lines().iter().any(|l| l.ends_with('\r')) { "\r" } else { "" };
+            now.remove(now.iter().position(|l| *l == format!("- [ ] {new}{cr}")).unwrap());
         }
         prop_assert_eq!(kept, now);
     }

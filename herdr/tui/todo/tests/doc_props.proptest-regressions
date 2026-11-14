@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 499f8a3f28fce15f7f8bb4db59c553c87571f171fb7144202a952fb1cd335a00 # shrinks to (text, _) = ("- [x] oA\n- [ ] A\n- [ ] 0\n- [ ] A\n- [ ] A\n- [ ] -", false), pick = Index(3074457345618258603), op = 1, new = "o"
+cc ae23d65d87b7b96c6c794cd83c7ab8b28be2f00784823003aa3f0f7adc24b111 # shrinks to (text, _) = ("\r", false), pick = Index(0), op = 0, new = "a"

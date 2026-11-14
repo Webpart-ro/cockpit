@@ -472,6 +472,13 @@ export function fill(template: string, values: Record<string, string>) {
 }
 
 
+// The item lines of the to-do file, read without a CRLF file's `\r` (Notepad, a Windows checkout).
+export const todoItems = (body: string) => body.split(/\r?\n/).filter(l => /^- \[( |x)\] /.test(l))
+
+// The to-do file with a new open item on top, in the file's own line ending.
+export const todoAdded = (body: string, text: string) =>
+  ['# To-do', '', `- [ ] ${text}`, ...todoItems(body), ''].join(body.includes('\r\n') ? '\r\n' : '\n')
+
 // Whether the session runs on Windows, where Unix tools such as sh may not be on PATH.
 export async function isWindows($: $) {
   return (await $.env.get('OS')) === 'Windows_NT'

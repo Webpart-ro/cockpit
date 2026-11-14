@@ -7,7 +7,7 @@ import { processRequests, refreshCi } from './ci'
 import { recordCost, startCosts } from './costs'
 import { DRAWING_SECTION, artifactRefusal, freshTurn, pageRefusal } from './drawing'
 import { forgetFacts, reportFacts } from './facts'
-import { cacheDir, home } from './config'
+import { cacheDir, home, todoAdded, todoItems } from './config'
 import { refreshMail } from './mail'
 import { CHANGES_SPEC, CHANGES_TOOL_FULL, HEALTH_SPEC, HEALTH_TOOL_FULL, READ_SPEC, READ_TOOL_FULL, SEARCH_SPEC, SEARCH_TOOL_FULL, changesArgs, find, healthArgs, readArgs, searchArgs } from './find'
 import { refreshLinks, refreshViews, renderFooter } from './footer'
@@ -122,13 +122,12 @@ export const register: Register = on => {
   on('command.run', { command: 'todo' }, async ($, e) => {
     const path = `${await home($)}/.config/cockpit/todo.md`
     const body = await $.fs.read(path).catch(() => '# To-do\n\n')
-    const items = body.split('\n').filter(l => /^- \[( |x)\] /.test(l))
     const text = e.args.trim()
     if (!text) {
-      const open = items.filter(l => l.startsWith('- [ ] ')).map(l => l.slice(6))
+      const open = todoItems(body).filter(l => l.startsWith('- [ ] ')).map(l => l.slice(6))
       return { text: open.length > 0 ? open.map(t => `• ${t}`).join('\n') : 'Nothing on the to-do list.' }
     }
-    await $.fs.write(path, ['# To-do', '', `- [ ] ${text}`, ...items, ''].join('\n'))
+    await $.fs.write(path, todoAdded(body, text))
     return { text: `Added to the to-do list: ${text}` }
   })
 
