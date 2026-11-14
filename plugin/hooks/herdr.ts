@@ -1,6 +1,6 @@
 import type { EngineInterface } from 'claude-code'
 
-import { cockpitCommand, loadConfig } from './config'
+import { cockpitCommand, isWindows, loadConfig } from './config'
 
 type $ = EngineInterface
 
@@ -64,9 +64,16 @@ export async function frontendOf($: $): Promise<Frontend | undefined> {
 // The Herdr app's programs, from ~/.local/bin where its installer puts them.
 const APP_PATH = 'PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"'
 
+// Runs `herdr-app` with the arguments: through sh with the app's folders on PATH, on Windows directly (sh may not be on PATH there).
+async function appRun($: $, verb: string, ...args: string[]) {
+  if (await isWindows($)) return $.process.run([(await $.env.get('HERDR_APP_BIN')) || 'herdr-app', verb, ...args], { timeoutMs: 10_000 })
+  const script = `${APP_PATH} exec "\${HERDR_APP_BIN:-herdr-app}" ${verb}${args.map((_, i) => ` "$${i + 1}"`).join('')}`
+  return $.process.run(['sh', '-c', script, 'sh', ...args], { timeoutMs: 10_000 })
+}
+
 // `herdr-app do <command> <json>`: what it made, undefined when it failed.
 export async function appDo($: $, command: string, args: Record<string, unknown> = {}): Promise<Record<string, unknown> | undefined> {
-  const done = await $.process.run(['sh', '-c', `${APP_PATH} exec "\${HERDR_APP_BIN:-herdr-app}" do "$1" "$2"`, 'sh', command, JSON.stringify(args)], { timeoutMs: 10_000 })
+  const done = await appRun($, 'do', command, JSON.stringify(args))
   if (done.exitCode !== 0) return undefined
   const made = JSON.parse(done.stdout || '{}') as Record<string, unknown>
   return made.error ? undefined : made
@@ -78,13 +85,13 @@ export type AppSpace = { id: string; name: string; folder: string; machine: stri
 
 // `herdr-app ls`: the spaces with their tabs and terminals.
 export async function appSpaces($: $): Promise<AppSpace[]> {
-  const listed = await $.process.run(['sh', '-c', `${APP_PATH} exec "\${HERDR_APP_BIN:-herdr-app}" ls`], { timeoutMs: 10_000 })
+  const listed = await appRun($, 'ls')
   return listed.exitCode === 0 ? ((JSON.parse(listed.stdout || '{}') as { spaces?: AppSpace[] }).spaces ?? []) : []
 }
 
 // What `herdr-app status` says is on screen: the selected space and tab.
 async function appStatus($: $) {
-  const shown = await $.process.run(['sh', '-c', `${APP_PATH} exec "\${HERDR_APP_BIN:-herdr-app}" status`], { timeoutMs: 10_000 })
+  const shown = await appRun($, 'status')
   return shown.exitCode === 0 ? (JSON.parse(shown.stdout || '{}') as { space?: string; tab?: string; layout?: string }) : {}
 }
 

@@ -346,24 +346,32 @@ export function forgetConfig() {
   cached = undefined
 }
 
+// The home folder with forward slashes: HOME, else Windows' USERPROFILE or HOMEDRIVE+HOMEPATH. Throws without one, so nothing writes below `/`.
 export async function home($: $) {
-  return (await $.env.get('HOME')) ?? ''
+  const drive = await $.env.get('HOMEDRIVE')
+  const path = await $.env.get('HOMEPATH')
+  const found = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || (drive && path ? `${drive}${path}` : '')
+  if (!found) throw new Error('no home folder: HOME and USERPROFILE are not set')
+  return found.replace(/\\/g, '/').replace(/\/+$/, '')
 }
 
 export async function cacheDir($: $) {
   return `${await home($)}/.cache/cockpit`
 }
 
-// The cockpit command: the herdr plugin's cockpit.sh through its link, else the binary `cockpit app install` noted in
-// the Herdr app's home, else the copy of the herdr folder the Claude plugin's marketplace holds.
+// The cockpit command: a Windows build (cockpit.exe) that `cockpit app install` noted in the Herdr app's home, else the
+// herdr plugin's cockpit.sh through its link, else any binary noted there, else the copy of the herdr folder the Claude
+// plugin's marketplace holds.
 export async function cockpitCommand($: $): Promise<string[] | undefined> {
   const dir = await home($)
   const exists = (path: string) => $.fs.stat(path).then(() => true, () => false)
-  const linked = `${dir}/.config/cockpit/herdr/cockpit.sh`
-  if (await exists(linked)) return ['sh', linked]
   const appHome = (await $.env.get('HERDR_APP_HOME')) || `${dir}/.config/herdr-app`
   const bin = (JSON.parse(await $.fs.read(`${appHome}/cockpit.json`).catch(() => '{}')) as { bin?: string }).bin
-  if (bin && (await exists(bin))) return [bin]
+  const binExists = bin ? await exists(bin) : false
+  if (bin && binExists && /\.exe$/i.test(bin)) return [bin]
+  const linked = `${dir}/.config/cockpit/herdr/cockpit.sh`
+  if (await exists(linked)) return ['sh', linked]
+  if (bin && binExists) return [bin]
   const shipped = `${dir}/.claude/plugins/marketplaces/cockpit/herdr/cockpit.sh`
   return (await exists(shipped)) ? ['sh', shipped] : undefined
 }
@@ -463,6 +471,11 @@ export function fill(template: string, values: Record<string, string>) {
   return template ? template.replace(/\{(\w+)\}/g, (_, key: string) => encodeURIComponent(values[key] ?? '')) : undefined
 }
 
+
+// Whether the session runs on Windows, where Unix tools such as sh may not be on PATH.
+export async function isWindows($: $) {
+  return (await $.env.get('OS')) === 'Windows_NT'
+}
 
 // A file other sessions or the herdr apps read, written beside it then moved in place, so none reads half of it.
 export async function writeAtomic($: $, path: string, body: string) {

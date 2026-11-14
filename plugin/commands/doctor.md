@@ -2,7 +2,7 @@
 description: Check every part of cockpit and fix what is broken
 ---
 
-Run `COCKPIT_APP_WAIT=0 sh ~/.config/cockpit/herdr/app.sh doctor` (when that link is missing, neither the herdr plugin nor the Herdr app half is set up: say so and suggest `/cockpit:setup`). When it prints `no cockpit binary for this machine yet` instead of checks, the `cockpit` binary is missing and could not be fetched: say so, and suggest `sh ~/.config/cockpit/herdr/fetch-apps.sh` (its error says why) or `cargo build --release` in `~/.config/cockpit/herdr/tui`.
+On Windows first run `sh -c true`: when `sh` is not found, report a `fail` (the plugin runs `sh`, `mv`, `rm` and `nohup` for its hooks and the show tool) and the fix: put Git for Windows' `usr\bin` folder on PATH, then restart Claude Code. Then run `COCKPIT_APP_WAIT=0 sh ~/.config/cockpit/herdr/app.sh doctor` (when that link is missing, neither the herdr plugin nor the Herdr app half is set up: say so and suggest `/cockpit:setup`). When it prints `no cockpit binary for this machine yet` instead of checks, the `cockpit` binary is missing and could not be fetched: say so, and suggest `sh ~/.config/cockpit/herdr/fetch-apps.sh` (its error says why) or `cargo build --release` in `~/.config/cockpit/herdr/tui`.
 
 Reply with the `fail` and `warn` lines only, each as one short line: what is wrong and the fix the line names. When everything is `ok`, say so in one line.
 
