@@ -1,6 +1,7 @@
 //! The hub keeping the spaces on the plugin's version: every 10 minutes it installs the version's binary once the release
 //! has it, then hands over to it.
 
+use cockpit_core::platform;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -32,7 +33,7 @@ pub(crate) fn newer_binary(dir: &Path) -> Option<std::path::PathBuf> {
     if installed(dir)? != version || version == env!("CARGO_PKG_VERSION") {
         return None;
     }
-    let binary = dir.join("bin/cockpit");
+    let binary = dir.join("bin").join(platform::exe_name("cockpit"));
     let said = Command::new(&binary).arg("--version").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
     (String::from_utf8_lossy(&said.stdout).trim() == format!("cockpit {version}")).then_some(binary)
 }
@@ -40,11 +41,11 @@ pub(crate) fn newer_binary(dir: &Path) -> Option<std::path::PathBuf> {
 /// Stops the space apps run from `dir`'s bin/cockpit (`cockpit space` starts them by its full path); their supervisors
 /// start them again on the binary now there.
 pub fn restart_apps(dir: &Path) {
-    let Ok(ours) = dir.join("bin/cockpit").canonicalize() else { return };
+    let Ok(ours) = dir.join("bin").join(platform::exe_name("cockpit")).canonicalize() else { return };
+    // the space apps are run by the herdr TUI's supervisors, which Windows does not have yet; with no ps this stops nothing.
     let Ok(listed) = Command::new("ps").args(["-axo", "pid=,command="]).stderr(Stdio::null()).output() else { return };
     for pid in space_apps(&String::from_utf8_lossy(&listed.stdout), &ours) {
-        // SAFETY: kill only sends SIGTERM to a process ps just listed.
-        unsafe { libc::kill(pid, libc::SIGTERM) };
+        platform::terminate(pid as u64);
     }
 }
 

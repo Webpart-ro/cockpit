@@ -1,6 +1,7 @@
 //! A command run every few seconds in the background, its lines shown with errors in red and warnings in orange, then a
 //! status line. Focused, the block scrolls on its own (j/k/g/G); it follows the end until scrolled up, and again at G.
 
+use cockpit_core::platform;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::LazyLock;
@@ -39,7 +40,12 @@ pub struct Log {
 
 /// Runs the command through sh in `cwd`: its output (stdout then stderr) and exit code.
 pub fn run(command: &str, cwd: &Path) -> (String, i32) {
-    let child = Command::new("sh").args(["-c", command]).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
+    let child = platform::args(&mut Command::new(platform::shell()), ["-c", command])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
     let mut child = match child {
         Ok(child) => child,
         Err(err) => return (err.to_string(), 1),
@@ -190,5 +196,17 @@ impl Log {
         }
         out.push(status.target(Target::Log));
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quotes_inside_a_space_free_command_reach_the_shell() {
+        // Unquoted `$IFS` splits into words, so the command only echoes `a` when the shell still sees the quotes.
+        let (out, code) = run("echo$IFS\"a\"", &std::env::temp_dir());
+        assert_eq!((out.trim(), code), ("a", 0));
     }
 }

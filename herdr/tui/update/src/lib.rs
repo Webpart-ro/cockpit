@@ -33,6 +33,8 @@ pub enum Outcome {
 
 /// Brings `dir`'s bin/ to the plugin's version from the releases at `base`; an error says what failed.
 pub fn update(dir: &Path, base: &str) -> Result<Outcome, String> {
+    #[cfg(windows)]
+    install::remove_aside(&dir.join("bin"));
     let Some(version) = wanted(dir) else { return Ok(Outcome::Current) };
     if installed(dir).as_deref() == Some(version.as_str()) || dev_build(dir) {
         return Ok(Outcome::Current);

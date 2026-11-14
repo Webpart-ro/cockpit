@@ -3,6 +3,7 @@
 //! order with what each changes, then laid over the diff as it is now (a step whose code moved is outdated, a hunk no
 //! step covers is listed). The prompt, schema and checks follow dmazlum/herdr-walkthrough (MIT).
 
+use cockpit_core::platform;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -235,8 +236,10 @@ pub fn start_in(root: &Path, repo: &str, scope: &str, model: &str, patch: &str, 
     let listed: Vec<Value> = d.files.iter().map(|(p, a)| json!({"path": p, "aliases": a})).collect();
     files::write(&job.join("meta.json"), &json!({"aliases": aliases, "files": listed, "model": model, "repo": repo, "scope": scope, "at": now_ms()}))
         .map_err(err)?;
-    let mut command = Command::new("sh");
-    command.arg(job.join("run.sh")).args(["900", input]).args(&argv).current_dir(&job).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    let mut command = Command::new(platform::shell());
+    platform::args(&mut command, [job.join("run.sh").into_os_string(), "900".into(), input.into()]);
+    platform::args(&mut command, &argv);
+    command.current_dir(&job).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     // A nested agent must not think it runs inside the session that asked.
     for var in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"] {
         command.env_remove(var);

@@ -23,7 +23,6 @@ resvg.workspace = true
 regex.workspace = true
 tachyonfx.workspace = true
 notify.workspace = true
-signal-hook = "0.3.18"
 libmimalloc-sys = { version = "0.1.49", default-features = false, features = ["extended"] }
 comrak = { version = "0.59.0", default-features = false }
 tree-sitter = "0.27.1"
@@ -54,3 +53,6 @@ similar = { version = "3.2.1", features = ["unicode"] }
 insta.workspace = true
 proptest = "1.12.0"
 tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3.18"

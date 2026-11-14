@@ -93,7 +93,12 @@ pub fn patch_of(repo: &str, scope: &str) -> Result<(String, Value), String> {
 /// `{repo, scope, since}`: the changes (`{same: true}` with the walkthrough when the patch hashes to `since`), where
 /// they come from, and the walkthrough of that scope as it stands over them.
 pub fn view(args: &Value, _doc: &dyn Fn(&str) -> Value) -> Value {
+    #[cfg(unix)]
     let Some(asked) = args["repo"].as_str().filter(|r| r.starts_with('/')) else { return json!({"error": "no repository: focus an agent working in one"}) };
+    #[cfg(windows)]
+    let asked = args["repo"].as_str().filter(|r| Path::new(r).is_absolute());
+    #[cfg(windows)]
+    let Some(asked) = asked else { return json!({"error": "no repository: focus an agent working in one"}) };
     let Some(repo) = toplevel(asked) else { return json!({"error": format!("{asked} is not in a git repository")}) };
     let scope = args["scope"].as_str().filter(|s| matches!(*s, "branch" | "pr")).unwrap_or("uncommitted");
     let (patch, about) = match patch_of(&repo, scope) {
