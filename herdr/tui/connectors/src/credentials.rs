@@ -43,10 +43,15 @@ impl Store {
             let status = child.wait().map_err(|e| e.to_string())?;
             return if status.success() { Ok(()) } else { Err("the keychain refused it".into()) };
         }
+        #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
         let path = self.file();
         std::fs::create_dir_all(path.parent().unwrap_or(&path)).map_err(|e| e.to_string())?;
-        let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&path).map_err(|e| e.to_string())?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&path).map_err(|e| e.to_string())?;
         file.write_all(text.as_bytes()).map_err(|e| e.to_string())
     }
 

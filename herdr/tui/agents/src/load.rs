@@ -39,6 +39,7 @@ fn root(l: &Live, session: Option<&str>) -> Option<u32> {
     })
 }
 
+#[cfg(unix)]
 fn ps() -> HashMap<u32, (u32, f64, u64)> {
     let text = term::output(&["ps".into(), "-A".into(), "-o".into(), "pid=,ppid=,%cpu=,rss=".into()], 5).unwrap_or_default();
     text.lines()
@@ -47,6 +48,11 @@ fn ps() -> HashMap<u32, (u32, f64, u64)> {
             Some((w.next()?.parse().ok()?, (w.next()?.parse().ok()?, w.next()?.replace(',', ".").parse().ok()?, w.next()?.parse().ok()?)))
         })
         .collect()
+}
+
+#[cfg(windows)]
+fn ps() -> HashMap<u32, (u32, f64, u64)> {
+    cockpit_core::platform::processes().into_iter().map(|p| (p.pid, (p.ppid, p.cpu, p.rss_kb))).collect()
 }
 
 /// `{cpu, mem, history}` for an agent (CPU in percent of one core, memory in MB), or null when its process is unknown.

@@ -1,12 +1,11 @@
 //! Child processes: one run to its end with a timeout, or one left running in its own process group, reaped by a thread
 //! so it never lingers as a zombie.
 
+use cockpit_core::platform;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc::channel;
 use std::time::Duration;
-
-use std::os::unix::process::CommandExt;
 
 pub struct Out {
     /// False when it could not start or ran out of time.
@@ -27,8 +26,8 @@ pub fn run(argv: &[String], timeout: Duration, cwd: Option<&Path>) -> Out {
     let Some((program, args)) = argv.split_first() else {
         return Out { started: false, code: 1, stdout: String::new(), stderr: "no command".into() };
     };
-    let mut command = Command::new(program);
-    command.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut command = platform::command(program, args);
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
@@ -52,8 +51,7 @@ pub fn run(argv: &[String], timeout: Duration, cwd: Option<&Path>) -> Out {
         },
         Ok(Err(err)) => Out { started: false, code: 1, stdout: String::new(), stderr: err.to_string() },
         Err(_) => {
-            // SAFETY: kill only sends a signal to the child this function started and still owns.
-            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            platform::kill(u64::from(pid));
             Out { started: false, code: 1, stdout: String::new(), stderr: format!("Command '{program}' timed out after {} seconds", timeout.as_secs()) }
         }
     }
@@ -67,8 +65,8 @@ pub fn run15(argv: &[String]) -> Out {
 /// Starts argv in its own process group, its output to `log` or nowhere; `done` runs with its exit code once it ends.
 pub fn spawn(argv: &[String], cwd: Option<&Path>, log: Option<std::fs::File>, done: impl FnOnce(i32) + Send + 'static) -> std::io::Result<u32> {
     let (program, args) = argv.split_first().ok_or_else(|| std::io::Error::other("no command"))?;
-    let mut command = Command::new(program);
-    command.args(args).stdin(Stdio::null()).process_group(0);
+    let mut command = platform::command(program, args);
+    platform::new_group(command.stdin(Stdio::null()));
     match log {
         Some(file) => {
             let err = file.try_clone()?;
@@ -92,9 +90,7 @@ pub fn spawn(argv: &[String], cwd: Option<&Path>, log: Option<std::fs::File>, do
 
 /// shutil.which: the program's path on PATH, if any.
 pub fn which(name: &str) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|dir| dir.join(name)).find(|p| p.is_file() && p.metadata().is_ok_and(|m| m.permissions().mode() & 0o111 != 0))
+    platform::which(name)
 }
 
 pub fn strings(words: &[&str]) -> Vec<String> {

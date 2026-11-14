@@ -237,6 +237,10 @@ fn mirror(path: &Path, value: &Value) -> std::io::Result<()> {
 fn remove_locks(dir: &Path) {
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
+        #[cfg(windows)]
+        if name == "hub.lock" {
+            continue;
+        }
         if name.ends_with(".lock") || name.contains(".lock.stale-") {
             let path = entry.path();
             let _ = std::fs::remove_dir(&path).or_else(|_| std::fs::remove_file(&path));

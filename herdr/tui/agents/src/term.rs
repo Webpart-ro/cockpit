@@ -152,6 +152,7 @@ pub fn list(only: Option<&str>) -> Vec<Live> {
 }
 
 fn tui_running() -> bool {
+    // pgrep finds the herdr TUI, which Windows has none of: failing to spawn reads as "not running", which is right.
     Command::new("pgrep").args(["-x", "herdr"]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
@@ -555,7 +556,7 @@ mod tests {
 
     fn rollout(dir: &Path, id: &str, cwd: &str, done: bool) -> PathBuf {
         let day = chrono::Local::now().format("%Y/%m/%d").to_string();
-        let path = dir.join(format!("sessions/{day}/rollout-2026-11-03T10-00-00-{id}.jsonl"));
+        let path = day.split('/').fold(dir.join("sessions"), |path, part| path.join(part)).join(format!("rollout-2026-11-03T10-00-00-{id}.jsonl"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut lines = vec![
             json!({"timestamp": "2026-11-03T10:00:00Z", "type": "session_meta", "payload": {"id": id, "cwd": cwd, "source": "cli", "git": {"branch": "me/eng-412-daily-quotas"}}}),

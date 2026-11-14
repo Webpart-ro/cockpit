@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! Every action against its expected outcome: the request runs through the hub on a sandbox, and the herdr, claude and
 //! script calls, the reply and the files it changed must match `tests/fixtures/expected/<case>.json`.
 //! `RECORD_EXPECTED=1 cargo test -p cockpit-hub --test actions` rewrites those files from the hub's outcomes.

@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! The socket protocol, the hub started on a sandbox HOME: one instance, a stale socket taken over, the idle exit, each
 //! op's answer, and the shared documents written, pushed and leased.
 
