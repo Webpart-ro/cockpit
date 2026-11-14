@@ -2,7 +2,7 @@
 //! target, and each `<label>=<action>` button does its own. Notifications switched off in the config silence every
 //! caller, the mod's and the apps' alike.
 
-use std::os::unix::process::CommandExt;
+use crate::platform;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -96,9 +96,16 @@ fn to_app(notification: &Value) -> bool {
     if let Some(deliver) = GUI.get() {
         return deliver(notification);
     }
+    #[cfg(unix)]
     if std::os::unix::net::UnixStream::connect(crate::hub::socket()).is_err() {
         return false;
     }
+    #[cfg(windows)]
+    {
+        crate::hub::request_if_running(&json!({"op": "notify", "notification": notification}), std::time::Duration::from_secs(2))
+            .is_ok_and(|a| a["delivered"] == true)
+    }
+    #[cfg(unix)]
     crate::hub::request(&json!({"op": "notify", "notification": notification}), std::time::Duration::from_secs(2)).is_ok_and(|a| a["delivered"] == true)
 }
 
@@ -141,7 +148,7 @@ fn quiet(command: &mut Command) -> &mut Command {
 /// macOS: the Cockpit app, built on first use, posts it with the cockpit icon and its buttons.
 fn notifier(title: &str, body: &str, action: &str, buttons: &[String]) -> bool {
     let app = files::config_dir().join("Cockpit.app/Contents/MacOS/cockpit-notify");
-    let built = quiet(Command::new("sh").arg(files::herdr_dir().join("notifier/build.sh"))).status().is_ok_and(|s| s.success());
+    let built = quiet(platform::args(&mut Command::new(platform::shell()), [files::herdr_dir().join("notifier/build.sh")])).status().is_ok_and(|s| s.success());
     built
         && executable(&app)
         && Command::new(&app).arg("post").args([title, body, action]).args(buttons).stdin(Stdio::null()).status().is_ok_and(|s| s.success())
@@ -169,7 +176,12 @@ fn notify_send(title: &str, body: &str, action: &str, buttons: &[String]) -> boo
         argv.extend(["--wait".into(), title.into(), body.into()]);
         let focus = quote(&script("cockpit.sh").to_string_lossy());
         let wait = format!("choice=$(\"$@\" 2>/dev/null); target=; case \"$choice\" in {cases}esac; [ -n \"$target\" ] && exec sh {focus} focus \"$target\"");
-        if let Ok(mut child) = quiet(Command::new("sh").arg("-c").arg(wait).arg("sh").args(argv)).process_group(0).spawn() {
+        if let Ok(mut child) = platform::new_group(quiet(platform::args(
+            &mut Command::new(platform::shell()),
+            ["-c", &wait, "sh"].into_iter().chain(argv.iter().map(String::as_str)),
+        )))
+        .spawn()
+        {
             std::thread::spawn(move || child.wait());
             return true;
         }
@@ -195,8 +207,7 @@ fn on_path(name: &str) -> bool {
 }
 
 fn executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    platform::executable(path)
 }
 
 /// A word the shell reads back as is.

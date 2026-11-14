@@ -42,6 +42,7 @@ fn now_ms() -> u64 {
 }
 
 /// When this machine booted, in seconds (0 when unknown).
+#[cfg(not(windows))]
 pub fn boot_time() -> u64 {
     if cfg!(target_os = "macos") {
         let out = std::process::Command::new("sysctl").args(["-n", "kern.boottime"]).output().ok();
@@ -50,6 +51,24 @@ pub fn boot_time() -> u64 {
     }
     let stat = std::fs::read_to_string("/proc/stat").unwrap_or_default();
     stat.lines().find_map(|l| l.strip_prefix("btime ")).and_then(|n| n.trim().parse().ok()).unwrap_or(0)
+}
+
+/// When this machine booted, in seconds (0 when unknown): the kernel's own boot time, which does not drift between calls.
+// shortcut: the kernel moves its boot time when the system clock is stepped, which reads as a reboot; cache it if that shows up.
+#[cfg(windows)]
+pub fn boot_time() -> u64 {
+    use windows_sys::Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemTimeOfDayInformation};
+    // The first field of SYSTEM_TIMEOFDAY_INFORMATION is the boot time in 100 ns ticks since 1601; the struct is 48 bytes and
+    // the kernel rejects a buffer that is not 8-aligned.
+    let mut info = [0i64; 6];
+    // SAFETY: the buffer is live, writable and as long as the length passed.
+    let status = unsafe { NtQuerySystemInformation(SystemTimeOfDayInformation, info.as_mut_ptr().cast(), 48, std::ptr::null_mut()) };
+    if status < 0 {
+        return 0;
+    }
+    let ticks = info[0];
+    const UNIX_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
+    u64::try_from((ticks - UNIX_EPOCH_TICKS) / 10_000_000).unwrap_or(0)
 }
 
 /// A session id as agents write them (a UUID, `ses_…`), the only kind of id ever typed into a shell.
@@ -367,6 +386,18 @@ mod tests {
 
     fn seen(handle: &str, session: &str, created: u64) -> Seen {
         Seen { handle: handle.into(), agent: "claude".into(), session: session.into(), cwd: "/code/api".into(), name: "api".into(), created }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_boot_time_is_stable_and_matches_the_uptime() {
+        use windows_sys::Win32::System::SystemInformation::GetTickCount64;
+        let first = boot_time();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert_eq!(first, boot_time());
+        let uptime = unsafe { GetTickCount64() } / 1000;
+        let estimate = now_ms() / 1000 - uptime;
+        assert!(first.abs_diff(estimate) <= 120, "boot {first} vs now - uptime {estimate}");
     }
 
     const A: &str = "0f0e0d0c-0b0a-0908-0706-050403020100";

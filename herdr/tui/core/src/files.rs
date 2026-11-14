@@ -7,6 +7,9 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::Value;
 
 pub fn home() -> PathBuf {
+    #[cfg(windows)]
+    return std::env::var_os("HOME").filter(|h| !h.is_empty()).or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default();
+    #[cfg(unix)]
     PathBuf::from(std::env::var("HOME").unwrap_or_default())
 }
 
