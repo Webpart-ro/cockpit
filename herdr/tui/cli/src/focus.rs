@@ -1,7 +1,7 @@
 //! `cockpit focus`: what a click on a cockpit notification does besides opening a URL, then the terminal hosting herdr
 //! brought forward on macOS.
 
-use std::os::unix::process::CommandExt;
+use cockpit_core::platform;
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -155,15 +155,9 @@ fn space(name: &str) {
 fn update() {
     let Ok(log) = std::fs::File::create(files::cache().join("update.log")) else { return };
     let Ok(err) = log.try_clone() else { return };
-    let mut command = Command::new("sh");
-    command.arg(files::herdr_dir().join("update.sh")).env("PATH", proc::path()).stdin(Stdio::null()).stdout(log).stderr(err);
-    // SAFETY: setsid only detaches the child from the terminal, between fork and exec.
-    unsafe {
-        command.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    let mut command = Command::new(platform::shell());
+    platform::args(&mut command, [files::herdr_dir().join("update.sh")]).env("PATH", proc::path()).stdin(Stdio::null()).stdout(log).stderr(err);
+    platform::detach(&mut command);
     let _ = command.spawn();
 }
 
@@ -203,6 +197,7 @@ const GHOSTTY: &str = "com.mitchellh.ghostty";
 
 /// The terminal herdr's client draws in, as `/dev/ttys012`: its server runs detached, with none.
 fn herdr_tty() -> Option<String> {
+    // Ghostty and tty focus are macOS and herdr-TUI only.
     let out = proc::run(&["ps", "-axo", "tty=,args="], &[], TIMEOUT)?;
     client_tty(&out.stdout)
 }

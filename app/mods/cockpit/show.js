@@ -5,7 +5,7 @@
 
 import { div, image, PathBuilder } from "gpui-kit";
 import { h_flex, v_flex, v_virtual_list, Scrollbar, InputState, Input, TextView } from "gpui-base";
-import { exec, appHome, focused, panes, run, layout, shared, setShared, props, settings, window as win } from "herdr";
+import { exec, appHome, focused, run, readTextFile, layout, shared, setShared, props, settings, window as win } from "herdr";
 import * as hub from "./hub.js";
 import { tokens, alpha, TEXT, RADIUS, Icon, Badge, Button, Kbd, Empty, Toaster, Progress, Spinner, openMenu, dur } from "./ui.js";
 import { Chart, Figures, zoomed, compact } from "./plot.js";
@@ -90,16 +90,6 @@ export default class Show {
     });
     this.subscribe(cx);
     cx.timer.every(1000, (cx) => this.tick(cx));
-    if (this.name) {
-      // A pane split from the agent's is focused for a moment: that is how this copy learns which pane it is.
-      const learn = () => {
-        const f = focused();
-        const mine = f?.pane && panes().find((x) => x.pane === f.pane && x.mod === "cockpit");
-        if (mine && !this.pane) this.pane = f.pane;
-      };
-      learn();
-      cx.timer.after(150, () => learn());
-    }
   }
 
   close() {
@@ -241,7 +231,7 @@ export default class Show {
     const script = `mkdir -p "$(dirname "$1")" && { [ -s "$1" ] || ${fetch}; } && ${size}`;
     cx.spawn(async (cx) => {
       try {
-        const r = await exec("sh", ["-c", script, "sh", `${appHome()}/${rel}`, pic.src]);
+        const r = await exec(await hub.tool("sh"), ["-c", script, "sh", `${appHome()}/${rel}`, pic.src]);
         const dims = [...r.stdout.matchAll(/(\d+) ?x ?(\d+)/g)].pop();
         const w = Number(/pixelWidth: (\d+)/.exec(r.stdout)?.[1] ?? dims?.[1]), h = Number(/pixelHeight: (\d+)/.exec(r.stdout)?.[1] ?? dims?.[2]);
         this.images.set(pic.key, r.code === 0 ? { state: "ready", rel, w: w || 800, h: h || 500 } : { state: "failed", error: r.stderr.trim() || "could not read the picture" });
@@ -320,9 +310,13 @@ export default class Show {
     if (url) hub.openUrl(url).catch(() => {});
   }
 
-  hide() {
-    if (this.pane) run("pane.close", { pane: this.pane });
-    else run("pane.close");
+  /** Closes this view's pane: the one the plugin named with `show:pane`, else the one it wrote to <name>.app (the message can
+   *  reach a view still starting); without either nothing (a close without a pane takes the focused one). */
+  async hide() {
+    const { cache, machine } = await hub.install().catch(() => ({}));
+    const kept = !this.pane && cache ? await readTextFile(`${cache}/show/${this.name}.app`, machine ? { on: machine } : undefined).then((t) => JSON.parse(t).pane).catch(() => null) : null;
+    const pane = this.pane ?? kept;
+    if (pane) run("pane.close", { pane });
   }
 
   copyCsv(cx, b) {
@@ -356,6 +350,7 @@ export default class Show {
     if (scope !== "show") return;
     const arg = rest.join(":");
     if (action === "hide" && arg === this.name) this.hide();
+    else if (action === "pane" && this.name && arg.startsWith(`${this.name}:`)) this.pane = arg.slice(this.name.length + 1);
     else if (action === "go") this.goTo(arg, cx);
     else if (action === "copy") {
       const b = this.view()?.blocks?.[Number(arg)];

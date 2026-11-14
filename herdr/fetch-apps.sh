@@ -8,7 +8,7 @@ cd "$(dirname "$0")" || exit 1
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' herdr-plugin.toml)
 [ -n "$version" ] || exit 0
 [ "$(cat bin/.version 2>/dev/null)" = "$version" ] && exit 0
-[ -x tui/target/release/cockpit ] && exit 0
+[ -x tui/target/release/cockpit ] || [ -x tui/target/release/cockpit.exe ] && exit 0
 here=$(pwd -P)
 
 # The binaries of earlier installs, newest first: the one the link names, and herdr's other folders for the plugin.
@@ -42,6 +42,8 @@ case "$(uname -s) $(uname -m)" in
   "Darwin x86_64") target=x86_64-apple-darwin ;;
   "Linux x86_64") target=x86_64-unknown-linux-gnu ;;
   "Linux aarch64" | "Linux arm64") target=aarch64-unknown-linux-gnu ;;
+  # No Windows release asset yet: Windows uses the local build.
+  MINGW* | MSYS*) exit 0 ;;
   *) exit 0 ;;
 esac
 

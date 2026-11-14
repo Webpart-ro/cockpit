@@ -1,6 +1,7 @@
 //! The show tool for any agent: the view checked as the plugin checks it, written to ~/.cache/cockpit/show and opened
 //! beside the agent (`cockpit show` in herdr, the mod's show view in the Herdr app), its answers sent back as prompts.
 
+use cockpit_core::platform;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -32,6 +33,11 @@ fn quoted(v: Option<&Value>) -> String {
 
 fn is_text(v: Option<&Value>) -> bool {
     v.is_some_and(Value::is_string)
+}
+
+/// A rooted path, or a drive path on Windows.
+fn is_absolute(p: &str) -> bool {
+    p.starts_with('/') || Path::new(p).is_absolute()
 }
 
 fn text(v: Option<&Value>) -> &str {
@@ -81,12 +87,12 @@ fn block_error(block: &Block, at: &str) -> Option<String> {
         }
         "compare" => {
             let picture =
-                |v: Option<&Value>| v.and_then(Value::as_str).is_some_and(|t| t.starts_with('/') || t.starts_with("http://") || t.starts_with("https://"));
+                |v: Option<&Value>| v.and_then(Value::as_str).is_some_and(|t| is_absolute(t) || t.starts_with("http://") || t.starts_with("https://"));
             return (!(picture(block.get("before")) && picture(block.get("after"))))
                 .then(|| format!("at {at}: a compare block is {{before, after}}, each an absolute path or an http(s) URL"));
         }
         "image" => {
-            let has_path = text(block.get("path")).starts_with('/');
+            let has_path = is_absolute(text(block.get("path")));
             let url = text(block.get("url"));
             let has_url = url.starts_with("http://") || url.starts_with("https://");
             if has_path == has_url {
@@ -99,7 +105,7 @@ fn block_error(block: &Block, at: &str) -> Option<String> {
         }
         "diff" => {
             let has_patch = is_text(block.get("patch"));
-            let has_repo = text(block.get("repo")).starts_with('/');
+            let has_repo = is_absolute(text(block.get("repo")));
             if has_patch == has_repo {
                 return Some(format!(
                     "at {at}: a diff takes either patch (a unified diff) or repo (an absolute path), not {}",
@@ -359,8 +365,7 @@ fn is_open(dir: &Path, name: &str) -> bool {
         return shown["args"].as_array().into_iter().flatten().any(|a| a["name"] == name);
     }
     let pid = std::fs::read_to_string(dir.join(format!("{name}.pid"))).unwrap_or_default();
-    // SAFETY: signal 0 only asks whether the process exists.
-    pid.trim().parse::<i32>().is_ok_and(|pid| pid > 0 && unsafe { libc::kill(pid, 0) } == 0)
+    pid.trim().parse::<i32>().is_ok_and(|pid| pid > 0 && platform::alive(pid as u64))
 }
 
 fn open_pane(dir: &Path, here: &Here, name: &str, session: &str, placement: &str) -> Result<(), String> {
@@ -567,6 +572,15 @@ mod tests {
             let expected = case.get("mcp").unwrap_or(&case["error"]).as_str().map(str::to_string);
             assert_eq!(view_error(&case["spec"]), expected, "{}", case["name"]);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_absolute_path_is_a_path() {
+        let image = |path: &str| view_error(&json!({"pane": "p", "title": "t", "blocks": [{"type": "image", "path": path}]}));
+        assert_eq!(image("F:/x.png"), None);
+        assert_eq!(image(r"F:\x.png"), None);
+        assert!(image("x.png").is_some());
     }
 
     #[test]

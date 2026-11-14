@@ -1,8 +1,11 @@
 //! `cockpit space <app>`: keeps a space's app running in its pane, as a child started again whenever it ends; ctrl+c
 //! twice in a row leaves it. An app that keeps dying soon after its start waits longer each time before the next one.
 
+use cockpit_core::platform;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -40,7 +43,16 @@ pub fn main(args: &[String]) {
         // An update replaced the binary: the next rounds run from the new one.
         match (&binary, &own) {
             (Some(binary), Some(_)) if current.is_some() && current != own => {
+                #[cfg(unix)]
                 let error = Command::new(binary).args(["space", app]).exec();
+                #[cfg(windows)]
+                let error = {
+                    // `cockpit space` supervises the herdr TUI's space apps; Windows has no TUI yet
+                    match Command::new(binary).args(["space", app]).status() {
+                        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+                        Err(error) => error,
+                    }
+                };
                 eprintln!("cockpit: {} space {app}: {error}", binary.display());
             }
             (_, None) => own = current,
@@ -79,13 +91,13 @@ fn run(binary: &Path, dir: &Path, app: &str) {
 
 /// The release's binary in bin/, else a dev build in tui/target/release/.
 fn binary(dir: &Path) -> Option<PathBuf> {
-    ["bin/cockpit", "tui/target/release/cockpit"].iter().map(|rel| dir.join(rel)).find(|p| crate::proc::executable(p))
+    ["bin", "tui/target/release"].iter().map(|rel| dir.join(rel).join(platform::exe_name("cockpit"))).find(|p| crate::proc::executable(p))
 }
 
 /// The release's binary, fetched when neither is there.
 fn fetch(dir: &Path) -> Option<PathBuf> {
-    let _ = Command::new("sh").arg("fetch-apps.sh").current_dir(dir).env("PATH", crate::proc::path()).status();
-    Some(dir.join("bin/cockpit")).filter(|p| crate::proc::executable(p))
+    let _ = platform::args(&mut Command::new(platform::shell()), ["fetch-apps.sh"]).current_dir(dir).env("PATH", crate::proc::path()).status();
+    Some(dir.join("bin").join(platform::exe_name("cockpit"))).filter(|p| crate::proc::executable(p))
 }
 
 /// The wait after a run: a second at first and after a long run, doubled after each short one, up to 30 seconds.
@@ -116,7 +128,15 @@ impl Identity {
     fn of(path: &Path) -> Option<Self> {
         let real = path.canonicalize().ok()?;
         let meta = std::fs::metadata(&real).ok()?;
-        Some(Identity(real, meta.dev(), meta.ino(), meta.mtime(), meta.mtime_nsec()))
+        #[cfg(unix)]
+        {
+            Some(Identity(real, meta.dev(), meta.ino(), meta.mtime(), meta.mtime_nsec()))
+        }
+        #[cfg(windows)]
+        {
+            let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+            Some(Identity(real, 0, 0, modified.as_secs() as i64, i64::from(modified.subsec_nanos()))) // the same supervisor; no dev/ino on Windows
+        }
     }
 }
 

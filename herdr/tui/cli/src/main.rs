@@ -30,7 +30,10 @@ mod update;
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use cockpit_core::platform;
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
@@ -81,9 +84,39 @@ const USAGE: &str = "cockpit: the spaces' apps, the hub they share and the agent
     cockpit queue [list|add <terminal> <text>|send <terminal> [all|<id>]|clear <terminal>|pick [terminal]]
                                                an agent's prompt queue (terminal: app:t3 or a herdr pane id)";
 
+type EnvPairs<'a> = Vec<(&'a str, &'a str)>;
+
+/// Splits the leading `--env K=V` pairs off the arguments: the variables, then the command and its arguments.
+fn take_env(args: &[String]) -> Result<(EnvPairs<'_>, &[String]), String> {
+    let mut vars = Vec::new();
+    let mut rest = args;
+    while let [flag, pair, tail @ ..] = rest {
+        if flag != "--env" {
+            break;
+        }
+        let Some((key, value)) = pair.split_once('=').filter(|(k, _)| !k.is_empty()) else { return Err(format!("--env wants KEY=VALUE, got {pair:?}")) };
+        vars.push((key, value));
+        rest = tail;
+    }
+    if rest == ["--env"] {
+        return Err("--env wants KEY=VALUE".to_string());
+    }
+    Ok((vars, rest))
+}
+
 fn main() {
     cockpit_core::answer_version("cockpit");
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let all: Vec<String> = std::env::args().skip(1).collect();
+    // Applied first, while the process is still single-threaded: it lets a caller that cannot set an environment pass one.
+    let args = match take_env(&all) {
+        Ok((vars, rest)) => {
+            for (key, value) in vars {
+                unsafe { std::env::set_var(key, value) };
+            }
+            rest.to_vec()
+        }
+        Err(why) => proc::fail(&why),
+    };
     let Some((command, rest)) = args.split_first() else { proc::fail(USAGE) };
     // Asking for help is not a mistake: it answers on stdout and exits 0, whole or for one command.
     if matches!(command.as_str(), "--help" | "-h" | "help") {
@@ -126,7 +159,7 @@ fn main() {
         "hub" if rest == ["ping"] => std::process::exit(if ping(Duration::from_secs(2)) { 0 } else { 1 }),
         "update" if rest.is_empty() => {
             let script = cockpit_core::files::herdr_dir().join("update.sh");
-            let status = std::process::Command::new("sh").arg(&script).env("PATH", proc::path()).status();
+            let status = platform::args(&mut std::process::Command::new(platform::shell()), [&script]).env("PATH", proc::path()).status();
             std::process::exit(status.ok().and_then(|s| s.code()).unwrap_or(1));
         }
         "update-apps" => update::main(rest),
@@ -216,7 +249,13 @@ fn app(ended: std::io::Result<()>) {
     }
 }
 
+#[cfg(windows)]
+fn ping(timeout: Duration) -> bool {
+    cockpit_core::hub::request_if_running(&serde_json::json!({"op": "ping"}), timeout).is_ok_and(|answer| answer["ok"] == true)
+}
+
 /// Whether the hub answers a ping on its socket in time; one that is not running is not started.
+#[cfg(unix)]
 fn ping(timeout: Duration) -> bool {
     let Ok(mut stream) = UnixStream::connect(cockpit_core::hub::socket()) else { return false };
     stream.set_read_timeout(Some(timeout)).ok();
@@ -226,4 +265,29 @@ fn ping(timeout: Duration) -> bool {
     }
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line).is_ok() && serde_json::from_str::<serde_json::Value>(&line).is_ok_and(|answer| answer["ok"] == true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::take_env;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn only_the_leading_env_pairs_are_taken() {
+        let given = args(&["--env", "A=1", "--env", "B=/x y=z", "notify", "--env", "C=3"]);
+        let (vars, rest) = take_env(&given).unwrap();
+        assert_eq!(vars, [("A", "1"), ("B", "/x y=z")]);
+        assert_eq!(rest, args(&["notify", "--env", "C=3"]));
+        assert_eq!(take_env(&args(&["hub", "ping"])).unwrap(), (vec![], &args(&["hub", "ping"])[..]));
+    }
+
+    #[test]
+    fn a_malformed_env_fails_clearly() {
+        for bad in [&["--env", "X", "hub"][..], &["--env", "=1", "hub"], &["--env"]] {
+            assert!(take_env(&args(bad)).unwrap_err().contains("--env wants KEY=VALUE"), "{bad:?}");
+        }
+    }
 }
