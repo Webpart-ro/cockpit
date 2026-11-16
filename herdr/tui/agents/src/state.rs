@@ -106,7 +106,7 @@ impl State {
             }
             if let Some(s) = &e.snooze {
                 // A snooze till a change wakes on any; a timed one when the agent comes to need you.
-                if s.until.is_none() || (c == "blocked" && s.class != "blocked") {
+                if s.until.is_none() || (matches!(c.as_str(), "blocked" | "failed") && s.class != c) {
                     e.snooze = None;
                 }
             }

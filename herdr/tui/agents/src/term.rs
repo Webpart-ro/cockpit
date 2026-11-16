@@ -36,6 +36,8 @@ pub struct Live {
     pub transcript: Option<String>,
     /// The process its agent runs under (the terminal's), when the frontend says.
     pub pid: Option<u32>,
+    /// Every process its agent's tree starts at that the frontend names: the terminal's and its foreground's.
+    pub roots: Vec<u32>,
     pub context: Option<f64>,
     /// When its status began, when the source knows (the demo).
     pub since: Option<u64>,
@@ -126,6 +128,7 @@ fn demo_lives(world: &Value) -> Vec<Live> {
                 session: a["session"].as_str().map(str::to_string),
                 transcript: None,
                 pid: None,
+                roots: Vec::new(),
                 context: a["context"].as_f64(),
                 since: a["since"].as_u64(),
             }
@@ -247,6 +250,7 @@ fn app_live(t: &Value, core: &Value, place: Place) -> Option<Live> {
         session: found.session,
         transcript: found.transcript,
         pid: found.got["pid"].as_u64().map(|p| p as u32),
+        roots: [&found.got["pid"], &found.got["foreground"]["pid"]].iter().filter_map(|p| p.as_u64()).map(|p| p as u32).collect(),
         since: None,
     })
 }
@@ -360,7 +364,7 @@ fn foreground_agent(got: &Value) -> Option<Agent> {
 
 /// A resting agent that closed its turn is done until the person looks at it; only its transcript tells the two apart.
 fn finished(agent: Option<&Agent>, transcript: Option<&str>, status: String) -> String {
-    let ended = || Some(transcripts::turn(agent?.transcripts, Path::new(transcript?))? == Turn::Done);
+    let ended = || Some(matches!(transcripts::turn(agent?.transcripts, Path::new(transcript?))?, Turn::Done | Turn::Interrupted));
     if status == "idle" && ended() == Some(true) { "done".into() } else { status }
 }
 
@@ -371,7 +375,7 @@ fn unreported(agent: Option<&Agent>, found: &Found) -> Option<String> {
     let word = match transcripts::turn(agent.transcripts, Path::new(path)) {
         Some(Turn::Working) => "working",
         Some(Turn::Blocked) => "blocked",
-        Some(Turn::Done) => "done",
+        Some(Turn::Done | Turn::Interrupted) => "done",
         None => "idle",
     };
     Some(word.to_string())
@@ -416,7 +420,7 @@ fn attached_claude(t: &Value) -> Option<(String, String)> {
 
 fn status_word(s: &str) -> String {
     match s {
-        "error" => "blocked".into(),
+        "error" | "failed" => "failed".into(),
         "working" | "blocked" | "done" | "idle" => s.into(),
         _ => "idle".into(),
     }
@@ -433,6 +437,11 @@ pub fn take_tui_listing() -> Option<(Value, Value)> {
 fn tui_list() -> Vec<Live> {
     let panes = json_of(herdr(&["pane", "list"]));
     let spaces = json_of(herdr(&["workspace", "list"]));
+    // A pane's tab label, which the person or another tool may have typed; its terminal's title where none is listed.
+    let tabs = json_of(herdr(&["tab", "list"]));
+    let tab_label = |id: &str| -> Option<String> {
+        tabs["result"]["tabs"].as_array()?.iter().find(|t| t["tab_id"] == id).and_then(|t| t["label"].as_str()).map(str::to_string)
+    };
     if !panes.is_null() && !spaces.is_null() {
         *TUI_LISTING.lock().unwrap_or_else(|e| e.into_inner()) = Some((spaces.clone(), panes.clone()));
     }
@@ -473,7 +482,7 @@ fn tui_list() -> Vec<Live> {
             space_name: label(p["workspace_id"].as_str().unwrap_or_default()),
             space_id: s("workspace_id"),
             tab_id: s("tab_id"),
-            tab_name: s("terminal_title_stripped"),
+            tab_name: tab_label(&s("tab_id")).unwrap_or_else(|| s("terminal_title_stripped")),
             title: s("terminal_title_stripped"),
             program: agent.to_string(),
             agent: found.as_ref().map(|a| a.id.clone()).unwrap_or_default(),
@@ -483,6 +492,7 @@ fn tui_list() -> Vec<Live> {
             session,
             transcript,
             pid: pid.map(|p| p as u32),
+            roots: ["pid", "foreground_pid"].iter().filter_map(|k| p[*k].as_u64()).map(|p| p as u32).collect(),
             since: None,
         });
     }
@@ -551,13 +561,19 @@ pub fn keys(handle: &str, keys: &[String]) -> Result<(), String> {
     if ok { Ok(()) } else { Err(format!("could not press {} in {handle}", keys.join(" "))) }
 }
 
-/// Pastes text and presses Enter (accents and all: key names cannot type them).
-pub fn paste(handle: &str, text: &str) -> Result<(), String> {
+/// Pastes text and presses Enter (accents and all: key names cannot type them). `into_menu` types into a menu's own
+/// field; otherwise a screen showing a menu refuses it, so words never land on a highlighted choice.
+pub fn paste(handle: &str, text: &str, into_menu: bool) -> Result<(), String> {
     if let Some(mut world) = demo() {
         demo_answered(&mut world, handle, true);
         return Ok(());
     }
+    // Words never go into a menu cockpit could not read, on either frontend: Enter would pick what its cursor is on.
+    if !into_menu && screen(handle, 0).is_some_and(|s| crate::prompt::menu_shown(&s)) {
+        return Err("it shows a menu cockpit cannot read: answer it in its terminal".into());
+    }
     let ok = match handle.strip_prefix(APP) {
+        // hc types into a waiting agent only when forced; cockpit has just looked at what its screen asks.
         Some(t) => hc(&["send", "--force", t, text]).is_some(),
         None => herdr(&["pane", "send-text", handle, text]).is_some() && herdr(&["pane", "send-keys", handle, "enter"]).is_some(),
     };

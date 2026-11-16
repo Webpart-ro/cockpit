@@ -3,6 +3,7 @@
 //! per session with the transcript's size and time, current while the transcript has not changed.
 
 use std::collections::HashSet;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -12,8 +13,6 @@ use cockpit_core::agent::{self, Agent};
 use cockpit_core::files;
 use cockpit_core::transcripts::{self, Role, Transcripts};
 use serde_json::{Value, json};
-
-use crate::term::output;
 
 static RUNNING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 static ERRORS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
@@ -115,18 +114,26 @@ const ASK: &str = "Below are the messages of a coding agent's session with a per
 Recap it in two or three sentences for the person coming back to it: what was done, where it stands, and what is left or \
 what the agent waits for. Plain prose, no preamble, no heading.";
 
-/// The agent that writes the recap: the session's own when it runs headless, else the default one, with what keeps
-/// the run out of its history.
+/// Selects a verified text-only runner, preferring the session's own agent and then an installed safe fallback.
 fn runner(kind: Transcripts, prompt: &str, model: Option<&str>) -> Result<Vec<String>, String> {
-    let own = agent::get(kind.agent()).filter(Agent::can_run);
-    let a = own.unwrap_or_else(agent::default);
-    let model = model.filter(|_| a.id == "claude");
-    let mut argv = a.run_argv(prompt, model).ok_or_else(|| format!("{} has no headless mode for a recap", a.name))?;
-    match a.id.as_str() {
-        "claude" => argv.extend(["--no-session-persistence", "--tools", "", "--strict-mcp-config"].map(str::to_string)),
-        "codex" => argv.extend(["--ephemeral", "--skip-git-repo-check"].map(str::to_string)),
-        _ => {}
+    let mut candidates = vec![agent::get(kind.agent()), Some(agent::default())];
+    candidates.extend(agent::all().into_iter().map(Some));
+    let a = candidates
+        .into_iter()
+        .flatten()
+        .find(|a| a.installed() && !a.quiet().is_empty())
+        .ok_or("Recaps need an installed agent that can answer with no tools, such as Claude Code")?;
+    runner_for(&a, prompt, model)
+}
+
+fn runner_for(a: &Agent, prompt: &str, model: Option<&str>) -> Result<Vec<String>, String> {
+    let quiet = a.quiet();
+    if quiet.is_empty() {
+        return Err(format!("{} has no verified text-only isolation for recaps", a.name));
     }
+    let model = model.filter(|m| !a.model.is_empty() && a.takes_model(m));
+    let mut argv = a.run_argv(prompt, model).ok_or_else(|| format!("{} has no headless mode for a recap", a.name))?;
+    argv.extend(quiet);
     Ok(argv)
 }
 
@@ -140,13 +147,23 @@ fn run(session: &str, cwd: &str, transcript: &Path, model: Option<&str>) -> Resu
     if Path::new(cwd).is_dir() {
         cmd.current_dir(cwd);
     }
-    // Without the terminal's variables, the run is not reported to Herdr as an agent of that terminal.
+    // The recap belongs to no terminal or parent agent session.
+    const SESSION_VARS: [&str; 8] = [
+        "CLAUDECODE",
+        "CLAUDE_PID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_CHILD_SESSION",
+        "CLAUDE_CODE_MESSAGING_SOCKET",
+        "CLAUDE_CODE_MESSAGING_TOKEN",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_SSE_PORT",
+    ];
     for (k, _) in std::env::vars() {
-        if k.starts_with("HERDR_") || k.starts_with("HC_") || k == "CLAUDECODE" {
+        if k.starts_with("HERDR_") || k.starts_with("HC_") || SESSION_VARS.contains(&k.as_str()) {
             cmd.env_remove(k);
         }
     }
-    let child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("{}: {e}", argv[0]))?;
+    let child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0).spawn().map_err(|e| format!("{}: {e}", argv[0]))?;
     let out = wait(child, Duration::from_secs(180))?;
     let out = String::from_utf8_lossy(out.trim_ascii()).into_owned();
     // An agent printing JSON (claude --output-format json) has its answer under `result`.
@@ -172,11 +189,14 @@ fn wait(child: std::process::Child, limit: Duration) -> Result<Vec<u8>, String> 
         let _ = tx.send(child.wait_with_output());
     });
     match rx.recv_timeout(limit) {
-        Ok(Ok(out)) if !out.stdout.is_empty() => Ok(out.stdout),
+        Ok(Ok(out)) if out.status.success() && !out.stdout.is_empty() => Ok(out.stdout),
         Ok(Ok(out)) => Err(String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("the agent failed").to_string()),
         Ok(Err(e)) => Err(e.to_string()),
         Err(_) => {
-            let _ = output(&["kill".into(), "-9".into(), pid.to_string()], 2);
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+            let _ = rx.recv_timeout(Duration::from_secs(1));
             Err("the recap took too long".into())
         }
     }
@@ -208,5 +228,19 @@ mod tests {
         assert!(d.ends_with("Agent: Done: the limiter counts per day."));
         assert!(d.len() <= DIGEST_CAP + 200, "{}", d.len());
         assert!(!d.contains("step 0:"));
+    }
+
+    #[test]
+    fn recaps_require_verified_text_only_isolation() {
+        let row = |id: &str| agent::builtin().into_iter().find(|a| a.id == id).unwrap();
+        for id in ["codex", "pi", "gemini", "omp"] {
+            assert!(runner_for(&row(id), "Recap.", None).unwrap_err().contains("text-only"));
+        }
+        let mut claude = row("claude");
+        let argv = runner_for(&claude, "Recap.", Some("haiku")).unwrap();
+        assert!(argv.windows(2).any(|w| w == ["--tools", ""]) && argv.contains(&"--safe-mode".into()));
+        assert!(argv.windows(2).any(|w| w == ["--model", "haiku"]));
+        claude.run = vec!["{bin}".into(), "{prompt}".into()];
+        assert!(runner_for(&claude, "Recap.", None).is_err(), "overridden templates cannot inherit isolation");
     }
 }

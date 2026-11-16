@@ -3,7 +3,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
 import { test } from "node:test";
 
-async function fixture() {
+async function fixture(layout = "cockpit") {
   const calls = [], notices = [];
   const context = createContext({ console });
   const imports = {
@@ -13,9 +13,10 @@ async function fixture() {
       panes: () => [{ terminal: "runner/t7", tab: "rtab", status: "done" }, { terminal: "runner/t8", tab: "rtab", status: "idle" }],
       run: (...args) => calls.push(args),
       setShared: (...args) => calls.push(["shared", ...args]),
+      shared: key => (key === "layout" ? layout : null),
       notify: notice => notices.push(notice),
     },
-    "./hub.js": { act: () => { throw new Error("no hub action expected"); } },
+    "./hub.js": { act: () => { throw new Error("no hub action expected"); }, openUrl: () => {} },
   };
   const sources = new Map(), modules = new Map();
   const folder = new URL("../mods/cockpit/", import.meta.url);
@@ -42,11 +43,22 @@ async function fixture() {
     modules.set(name, module);
     return module;
   }
-  const module = new SourceTextModule('export * from "./fleet.js"; export { default as Home } from "./home.js"; export { default as Sidebar } from "./sidebar.js"; export { AgentsModel } from "./agentsui.js";', { context });
+  const module = new SourceTextModule('export * from "./fleet.js"; export { default as Home } from "./home.js"; export { default as Sidebar } from "./sidebar.js"; export { AgentsModel } from "./agentsui.js"; export { default as Needs } from "./needs.js";', { context });
   await module.link(load);
   await module.evaluate();
   return { fleet: module.namespace, calls, notices };
 }
+
+test("the agents' screen is the one the shown layout calls it", async () => {
+  const cockpit = await fixture();
+  cockpit.fleet.goToAgent({ address: "t7" });
+  const selects = f => f.calls.filter(c => c[0] === "layout.select").map(c => `${c[1].stack}/${c[1].child}`);
+  assert.deepEqual(selects(cockpit).join(" "), "center/work");
+  const chat = await fixture("cockpit-chat");
+  chat.fleet.goToAgent({ address: "t7" });
+  // The reading layout stacks the conversation and the panes inside the screen that holds the side panel.
+  assert.deepEqual(selects(chat).join(" "), "screen/work view/chat");
+});
 
 test("a runner's t7 stays separate from local t7 and Go focuses the runner's terminal", async () => {
   const f = await fixture();
@@ -130,7 +142,35 @@ test("local Go, Peek, Open beside and Archive handlers retain their commands", a
   home.openBeside(cx, agent);
   home.archive(cx, agent);
   home.archiveAll(cx, [{ agent }]);
-  assert.deepEqual(f.calls.map(c => c[0]), ["agent.focus", "layout.select", "terminal.peek", "agent.focus", "layout.show", "tab.settle", "tab.settle"]);
+  assert.deepEqual(f.calls.map(c => c[0]), ["agent.focus", "layout.select", "shared", "terminal.peek", "agent.focus", "layout.show", "tab.settle", "tab.settle"]);
   assert.equal(f.calls.at(-1)[1].id, "tab7");
   assert.equal(f.notices.length, 0);
+});
+
+test("every view reads an agent's status through one helper: error is failed, an unknown word needs a look", async () => {
+  const { fleet } = await fixture();
+  const read = ["working", "blocked", "failed", "error", "done", "idle", "", null, "compacting"].map(fleet.agentStatus);
+  assert.equal(read.join(" "), "working blocked failed failed done idle idle idle blocked");
+  assert.equal(fleet.stageOf({ status: "failed" }), "needs", "a failed agent waits on you, beside the blocked ones");
+  assert.equal(fleet.stageOf({ hubStage: "failed" }), "needs");
+  const [row] = fleet.fleet({ agents: [{ address: "t7", title: "Retry failed CSV exports", interrupted: true, error: "exit 1" }] }, {});
+  assert.equal(row.interrupted, true);
+  assert.equal(row.error, "exit 1");
+});
+
+test("Needs lists the agents asking, then those stopped with an error, and the drawer counts both", async () => {
+  const { fleet } = await fixture("cockpit-chat");
+  const rows = [
+    { terminal: "app:t1", address: "t1", stage: "needs_you", question: { text: "Run the migration?" } },
+    { terminal: "app:t2", address: "t2", stage: "failed", status: "failed", error: "API Error: 529 overloaded" },
+    { terminal: "app:t3", address: "t3", stage: "working", status: "working" },
+    { terminal: "app:t4", address: "t4", stage: "done", status: "error" },
+    { terminal: "app:t5", address: "t5", stage: "done", status: "done", interrupted: true },
+  ];
+  assert.deepEqual([...fleet.needing(rows).map((r) => r.address)], ["t1", "t2", "t4"], "Herdr's raw error is a failure too; stopped by you is not");
+  const needs = Object.create(fleet.Needs.prototype);
+  needs.model = { value: { agents: rows } };
+  assert.deepEqual([...needs.waiting().map((r) => r.address)], ["t1", "t2", "t4"]);
+  const home = fleet.fleet({ agents: rows.slice(0, 2) }, null).filter((a) => a.stage === "needs").map((a) => a.address);
+  assert.deepEqual([...home.sort()], ["t1", "t2"], "the same agents Home's NEXT MOVE takes");
 });

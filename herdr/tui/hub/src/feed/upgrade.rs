@@ -78,7 +78,7 @@ pub fn check(config: &Config, now: u64) {
     };
     let _ = cockpit_core::files::write(&path, &next);
     if let Some(latest) = announce {
-        news::notify(config, &format!("⬆️ Cockpit {latest}"), &format!("You run {current}. Click to update cockpit and reload what runs it."), "update", &[]);
+        news::notify(config, &format!("⬆️ Cockpit {latest}"), &format!("You run {current}: click for the update."), "update", &[]);
     }
 }
 

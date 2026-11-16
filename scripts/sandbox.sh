@@ -3,14 +3,15 @@
 # never their cockpit data. Everything lives under $COCKPIT_SANDBOX (default: $TMPDIR/cockpit-gui). The window shares
 # herdr-core with the person's own: its spaces and terminals are theirs, so never create, close or type into them here.
 #
-#   sh scripts/sandbox.sh start            fake HOME from docs/screenshots/demo_data.py (FRESH=1 rebuilds it), dev build,
-#                                      a separate Herdr window on the cockpit layout, and the layout and mod copied
-#                                      again each time a file of app/ changes (Herdr reloads the mod on its own)
+#   sh scripts/sandbox.sh start            fake HOME from docs/screenshots/demo_data.py (FRESH=1 rebuilds it, with
+#                                      COCKPIT_DEMO_SOURCES=failing its sources failing), dev build, a separate Herdr
+#                                      window on the cockpit layout, and the layout and mod copied again each time a
+#                                      file of app/ changes (Herdr reloads the mod on its own)
 #   sh scripts/sandbox.sh do <cmd> [json]  a Herdr command in that window (layout.select, app.theme, ...)
 #   sh scripts/sandbox.sh show <app>       that app's block in front (work, todo, inbox, ...)
 #   sh scripts/sandbox.sh kit [charts]     the design kit's gallery as a window (every ui.js component, both themes)
 #   sh scripts/sandbox.sh light|dark       the window's appearance
-#   sh scripts/sandbox.sh key <keystroke>  a key pressed in the shown views (j, shift-d, ctrl-p, escape, ...)
+#   sh scripts/sandbox.sh key <keystroke>  a key pressed in the view in front (j, shift-d, ctrl-p, escape, ...)
 #   sh scripts/sandbox.sh shot [file.png]  a screenshot of that window, its path printed
 #   sh scripts/sandbox.sh check            herdr-app check on the mod
 #   sh scripts/sandbox.sh status           herdr-app status (errors from the mod show here)
@@ -62,15 +63,16 @@ start() {
       while [ -S "$app_home/herdr-app.sock" ] && app status >/dev/null 2>&1 && [ $i -lt 40 ]; do i=$((i + 1)); sleep 0.25; done
     fi
     in_box "$bin" hub stop >/dev/null 2>&1 || true
-    rm -f "$fake_home/.cache/cockpit/store.redb"
+    rm -f "$fake_home/.cache/cockpit/store.redb" "$fake_home/.cache/cockpit/hub.stopped"
     python3 "$repo/docs/screenshots/demo_data.py" "$fake_home" >/dev/null
   fi
   if ! running; then
-    # The app writes its home (AGENTS.md, keys.json, the shipped mods) on its first start.
+    # The app writes its home (AGENTS.md, keys.json, the shipped mods) on its first start. Its own environment says it is
+    # a sandbox that takes keys from a shell (`key`, `palette:type:`): no file written later can say so.
     if [ -n "$session" ]; then
-      open -n "$app_bundle" --env HERDR_APP_HOME="$app_home" --env HC_SESSION="$session"
+      open -n "$app_bundle" --env HERDR_APP_HOME="$app_home" --env COCKPIT_SANDBOX="$box" --env COCKPIT_TEST_KEYS=1 --env HC_SESSION="$session"
     else
-      open -n "$app_bundle" --env HERDR_APP_HOME="$app_home"
+      open -n "$app_bundle" --env HERDR_APP_HOME="$app_home" --env COCKPIT_SANDBOX="$box" --env COCKPIT_TEST_KEYS=1
     fi
     i=0
     until running; do
@@ -81,8 +83,9 @@ start() {
   fi
   [ -f "$box/watch.pid" ] && kill "$(cat "$box/watch.pid")" 2>/dev/null || true
   in_box "$bin" app install --from "$repo/app"
-  # The mod's next hub starts with the environment the install just wrote.
+  # The mod's next hub starts with the environment the install just wrote: the stop is not one the window waits out.
   in_box "$bin" hub stop >/dev/null 2>&1 || true
+  rm -f "$fake_home/.cache/cockpit/hub.stopped"
   # The watcher notes its own pid: $! would name the subshell running in_box, and stop would leave the watcher behind.
   in_box sh -c 'echo $$ >"$1"; exec nohup "$2" app install --watch --from "$3"' sh "$box/watch.pid" "$bin" "$repo/app" >"$box/watch.log" 2>&1 &
   app "do" overlay.close >/dev/null 2>&1 || true
@@ -111,5 +114,5 @@ case "${1:-}" in
     running && app "do" app.quit >/dev/null 2>&1 || true
     [ -z "$session" ] || "$box/hc.sh" server stop >/dev/null 2>&1 || true
     ;;
-  *) sed -n '2,23p' "$0"; exit 1 ;;
+  *) sed -n '2,24p' "$0"; exit 1 ;;
 esac

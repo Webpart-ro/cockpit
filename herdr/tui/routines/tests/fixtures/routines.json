@@ -156,6 +156,34 @@
    "problems": [
     "lists no tools: a lightest run loads nothing else, so it can call nothing"
    ]
+  },
+  {
+   "slug": "review-digest",
+   "name": "Review digest",
+   "path": "/home/me/.config/cockpit/routines/review-digest.md",
+   "when": "cron */15 8-18 * * 1-5 in Europe/London",
+   "whenText": "cron */15 8-18 * * 1-5",
+   "trigger": "schedule",
+   "error": null,
+   "run": "agent",
+   "agent": "claude",
+   "agentName": "Claude Code",
+   "agentSet": "",
+   "cwd": "",
+   "model": "haiku",
+   "tools": [
+    "Bash(gh pr list:*)"
+   ],
+   "mode": "",
+   "budget": null,
+   "timeout": 30,
+   "paused": false,
+   "prompt": "List the PRs waiting for my review, oldest first.",
+   "next": 1793265300000,
+   "notify": "failed",
+   "precheck": "gh pr list --search review-requested:@me | grep -q .",
+   "tz": "Europe/London",
+   "zone": "Europe/London"
   }
  ],
  "running": {
@@ -204,7 +232,9 @@
     "why": "🔴 CI failed: checkout me/eng-4120-quotas · test",
     "session": "9e8d7c6b-5a4f-4321-8fed-cba987654321",
     "cost": 0.41,
-    "summary": "The failure is a flaky OpenSearch test, not lint: left it alone"
+    "summary": "The failure is a flaky OpenSearch test, not lint: left it alone",
+    "kind": "exit",
+    "reason": "Ended with exit 1."
    }
   ],
   "notes-pull": [
@@ -217,6 +247,36 @@
     "why": "every 30 min",
     "session": "",
     "summary": "Already up to date."
+   }
+  ],
+  "review-digest": [
+   {
+    "id": "1793257200000",
+    "started": 1793263500000,
+    "ended": 1793263501000,
+    "ok": true,
+    "code": 1,
+    "why": "scheduled for 08:45",
+    "session": null,
+    "summary": "no PR waits for your review",
+    "skipped": "precheck",
+    "kind": "skipped",
+    "reason": "Skipped: its precheck found nothing to do (exit 1).",
+    "read": true,
+    "times": 4,
+    "since": 1793257200000
+   },
+   {
+    "id": "1793174400000",
+    "started": 1793174400000,
+    "ended": 1793174431000,
+    "ok": true,
+    "code": 0,
+    "why": "scheduled for 08:00",
+    "session": "3c1d2e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+    "cost": 0.02,
+    "summary": "2 PRs wait for you: api#412, web#413",
+    "checked": true
    }
   ]
  },

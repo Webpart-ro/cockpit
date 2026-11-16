@@ -61,8 +61,11 @@ fn tcp_on_an_explicit_interface_authenticates_and_streams_inbox_updates() {
     assert_eq!(read(&mut stream)["value"]["tickets"][0]["id"], "ENG-401");
     // ::1 is this machine, so the connection still writes; only a hub listening further out reads only.
     let mut writes = connect();
-    writeln!(writes.get_mut(), "{}", json!({"op": "store.put", "name": "queue", "value": {"items": ["one"]}, "token": info["token"]})).unwrap();
+    writeln!(writes.get_mut(), "{}", json!({"op": "store.put", "name": "meetings", "value": {"items": ["one"]}, "token": info["token"]})).unwrap();
     assert_eq!(read(&mut writes)["value"]["items"][0], "one");
+    // The queue's items become prompts: no client writes them, on any side.
+    writeln!(writes.get_mut(), "{}", json!({"op": "store.put", "name": "queue", "value": {"items": ["rm -rf"]}, "token": info["token"]})).unwrap();
+    assert!(read(&mut writes)["error"].as_str().unwrap().contains("hub alone"));
 }
 
 #[test]
@@ -204,7 +207,7 @@ case "$1 $2" in
      {"isResolved":false,"isOutdated":false,"path":"lib/a.ex","line":12,"originalLine":10,"comments":{"nodes":[{"author":{"login":"maya"},"body":"Why?"},{"author":{"login":"me"},"body":"Because."}]}},
      {"isResolved":true,"path":"lib/b.ex","line":1,"comments":{"nodes":[]}}]}}}}}' ;;
   "pr view") echo '{"files":[{"path":"lib/a.ex","additions":3,"deletions":1}]}' ;;
-  "run list") echo '[{"databaseId":42}]' ;;
+  "run list") echo '[{"databaseId":42,"conclusion":"failure","workflowName":"CI","headSha":"c0ffee"},{"databaseId":41,"conclusion":"success","workflowName":"Docs","headSha":"c0ffee"},{"databaseId":40,"conclusion":"failure","workflowName":"CI","headSha":"0ld"}]' ;;
   "run view") seq 1 250 | sed 's/^/line /' ;;
 esac
 "#;
@@ -244,7 +247,11 @@ fn fetch_ci_log_from_github_actions() {
     let log = hub.request(&json!({"op": "fetch", "kind": "ci_log", "args": {"repo": "api", "branch": "me/eng-401-login"}}));
     let lines = log["lines"].as_array().unwrap();
     assert_eq!((lines.len(), lines[0].as_str(), lines[199].as_str()), (200, Some("line 51"), Some("line 250")));
-    assert_eq!(log["run"], 42);
+    assert_eq!((&log["run"], &log["runs"], &log["sha"]), (&json!(42), &json!([42]), &json!("c0ffee")), "the newest commit's failed runs only");
+    let at = hub.request(&json!({"op": "fetch", "kind": "ci_log", "args": {"repo": "api", "branch": "me/eng-401-login", "sha": "c0ffee"}}));
+    assert_eq!(at["runs"], json!([42]));
+    let gh = std::fs::read_to_string(sandbox.root.join("gh.log")).unwrap();
+    assert!(gh.contains("run list --repo acme/api --limit 30 --json databaseId,conclusion,workflowName,headSha --commit c0ffee"), "{gh}");
 }
 
 #[test]
@@ -256,21 +263,28 @@ fn fetch_errors_reach_the_app() {
 }
 
 #[test]
-fn history_of_ticket_costs() {
+fn history_of_ticket_estimates() {
     let sandbox = sandbox();
     let hub = Hub::start(&sandbox, &[]);
-    let values = |hub: &Hub| hub.request(&json!({"op": "history", "kind": "ticket_cost", "key": "ENG-401"}))["values"].clone();
-    // Waits on a background scan, so the budget is wide: the whole file's hubs share this machine.
+    let values = |hub: &Hub| hub.request(&json!({"op": "history", "kind": "ticket_estimate", "key": "ENG-401"}))["values"].clone();
+    // Waits on the hub's first count, so the budget is wide: the whole file's hubs share this machine.
     let start = Instant::now();
     while values(&hub) != json!([8.75]) {
         assert!(start.elapsed() < Duration::from_secs(30), "no first point: {}", values(&hub));
         std::thread::sleep(Duration::from_millis(100));
     }
-    std::fs::write(sandbox.home().join(".cache/cockpit/costs/s-new.json"), r#"{"ENG-401": 1.25}"#).unwrap();
+    // A new session's estimate, $1.25 at $4 per million input tokens, all of it ENG-401's by its book.
+    let call = r#"{"type": "assistant", "timestamp": "2026-10-28T11:00:00Z", "requestId": "r-new", "message": {"id": "m-new", "model": "claude-opus-5-5", "usage": {"input_tokens": 312500, "output_tokens": 0}}}"#;
+    std::fs::write(sandbox.home().join(".claude/projects/-box-repos/s-new.jsonl"), format!("{call}\n")).unwrap();
+    std::fs::write(sandbox.home().join(".cache/cockpit/costs/s-new.json"), r#"{"ENG-401": 1}"#).unwrap();
+    // A usage chip's refresh counts again at once.
+    hub.request(&json!({"op": "act", "app": "sources", "action": "refresh", "args": ["usage-all"], "armed": null}));
     while values(&hub) != json!([8.75, 10.0]) {
         assert!(start.elapsed() < Duration::from_secs(60), "no second point: {}", values(&hub));
         std::thread::sleep(Duration::from_millis(100));
     }
+    let estimates: Value = serde_json::from_str(&std::fs::read_to_string(sandbox.home().join(".cache/cockpit/estimates.json")).unwrap()).unwrap();
+    assert_eq!((estimates["sessions"]["s-new"].as_f64(), estimates["tickets"]["ENG-401"].as_f64()), (Some(1.25), Some(10.0)));
 }
 
 #[test]
@@ -283,17 +297,62 @@ fn act_through_the_socket_like_core_bridge() {
 }
 
 #[test]
-fn meetings_join_and_brief_toggle() {
+fn meetings_join_and_brief() {
     let sandbox = sandbox();
     let hub = Hub::start(&sandbox, &[]);
     let meeting = json!({"id": "ev1_20261028T084500Z", "title": "Team daily", "join": "https://meet/abc"});
     let joined = hub.request(&json!({"op": "act", "app": "meetings", "action": "join", "args": [meeting], "armed": null}));
     assert_eq!(joined["note"], "opened https://meet/abc");
-    let toggled = hub.request(&json!({"op": "act", "app": "meetings", "action": "toggle_brief", "args": [meeting], "armed": null}));
-    assert_eq!(toggled["note"], "preparing the brief of Team daily, about a minute");
-    let pending = json!({"id": "ev2/odd id", "title": "Planning"});
-    let toggled = hub.request(&json!({"op": "act", "app": "meetings", "action": "toggle_brief", "args": [pending], "armed": null}));
-    assert_eq!(toggled["note"], "");
+    let prepared = hub.request(&json!({"op": "act", "app": "meetings", "action": "prepare", "args": [meeting], "armed": null}));
+    assert_eq!(prepared["note"], "preparing the brief of Team daily, about a minute");
+}
+
+#[test]
+fn a_red_run_a_client_writes_is_marked_as_the_client_s() {
+    // An agent's tools write the inbox: green, then red. The event says a client made it, so no CI news comes of it.
+    let sandbox = sandbox();
+    let hub = Hub::start(&sandbox, &[(common::SENT_BY, "app:t3")]);
+    let pr = |ci: &str| json!({"version": 1, "mine": [{"repo": "api", "number": 4, "url": "https://github.com/acme/api/pull/4", "branch": "me/eng-401-login", "ci": ci}]});
+    for ci in ["SUCCESS", "FAILURE"] {
+        assert!(hub.request(&json!({"op": "store.put", "name": "inbox", "value": pr(ci)}))["value"].is_object());
+    }
+    let events = hub.request(&json!({"op": "events", "since": 0}))["events"].clone();
+    let red = events.as_array().unwrap().iter().find(|e| e["kind"] == "ci_failing").unwrap_or_else(|| panic!("no red event in {events}"));
+    assert_eq!(red["by"], "client", "{red}");
+}
+
+/// The notifications a window following `hub` gets while `send` runs: the {notify} lines' notifications.
+fn notified(sandbox: &Sandbox, send: impl FnOnce()) -> Vec<Value> {
+    use std::io::{BufRead, BufReader, Write};
+    let mut stream = std::os::unix::net::UnixStream::connect(sandbox.socket()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    writeln!(stream, "{}", json!({"op": "subscribe", "notify": true})).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    send();
+    let lines = BufReader::new(stream).lines().map_while(Result::ok).filter(|l| !l.is_empty());
+    lines.take(1).map(|l| serde_json::from_str::<Value>(&l).unwrap()["notify"].clone()).collect()
+}
+
+#[test]
+fn a_client_s_notification_only_navigates_and_says_who_sent_it() {
+    let pr = "https://github.com/acme/api/pull/4";
+    let forged = json!({"title": "✅ Tests passed", "body": "Ready to merge\u{1b}[2J", "action": format!("act:merge:{pr}"), "row": "update",
+                        "buttons": [format!("Merge=act:merge:{pr}"), "Update=update", "Docs=https://docs.acme.dev", "Resume=herdr-app:resume"]});
+    for (sent_by, who) in [(Some("app:t3"), "an agent's tools (app:t3)"), (None, "a terminal")] {
+        let sandbox = sandbox();
+        let env: Vec<(&str, &str)> = sent_by.map(|h| (common::SENT_BY, h)).into_iter().collect();
+        let hub = Hub::start(&sandbox, &env);
+        let got = notified(&sandbox, || assert_eq!(hub.request(&json!({"op": "notify", "notification": forged})), json!({"delivered": true})));
+        let n = &got[0];
+        assert_eq!(n["title"], format!("From {who}: ✅ Tests passed"), "never cockpit's own words");
+        assert_eq!((n["body"].as_str(), n["from"].as_str()), (Some("Ready to merge"), Some(who)));
+        assert_eq!(
+            (n["action"].as_str(), n["row"].as_str()),
+            (Some(format!("inbox:{pr}").as_str()), Some(format!("inbox:{pr}").as_str())),
+            "an act becomes its row"
+        );
+        assert_eq!(n["buttons"], json!([format!("Merge=inbox:{pr}"), "Docs=https://docs.acme.dev"]), "no act, update or resume is kept");
+    }
 }
 
 #[test]

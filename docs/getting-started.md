@@ -57,6 +57,7 @@ Your work fills the spaces within a minute.
 | `prefix+m` | Meetings |
 | `prefix+o` | Monitor — what each release did to production |
 | `prefix+y` | Routines |
+| `prefix+shift+c` | Review — an agent's changes, commented line by line and sent back to it (pinned if you ask for it) |
 | `prefix+space` | The palette: everything, searchable |
 
 In every space: `j`/`k` move, `Enter` does the main action, `/` filters, `q` leaves. The row you are on shows its

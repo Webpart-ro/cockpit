@@ -64,7 +64,10 @@ pub fn act(app: &str, action: &str, args: &[Value]) -> Option<Value> {
     changed(Dirty::View(app.to_string()));
     Some(match done {
         Ok(note) => json!({"note": note, "pending": {}, "refreshing": {}, "error": null}),
-        Err(error) => json!({"note": "", "pending": {}, "refreshing": {}, "error": format!("{action}: {error}")}),
+        Err(error) => {
+            eprintln!("cockpit hub: {app} {action}: {error}");
+            json!({"note": "", "pending": {}, "refreshing": {}, "error": error})
+        }
     })
 }
 
@@ -153,13 +156,46 @@ pub fn subscribe(request: &Value, tx: Sender<String>) {
     }
 }
 
-/// Hands a notification {title, body, action, buttons} to the first window that shows them, as a {notify} line; false
-/// when none follows the hub.
+/// Hands a notification {title, body, action, row, buttons} to the first window that shows them, as a {notify} line;
+/// false when none follows the hub. One a client sent (any thread but the hub's own) comes as `from_a_client` makes it.
 pub fn notify(notification: &Value) -> bool {
+    let notification = if cockpit_core::peer::in_process() { notification.clone() } else { from_a_client(notification, &sender()) };
     let line = json!({"notify": notification}).to_string();
     let mut subs = subs();
     subs.retain(|s| s.tx.send(String::new()).is_ok());
     subs.iter().find(|s| s.notify).is_some_and(|s| s.tx.send(line).is_ok())
+}
+
+/// Who sent the request this thread serves, in a few words a notification shows.
+fn sender() -> String {
+    use cockpit_core::peer::Who;
+    match cockpit_core::peer::who() {
+        Who::Person => "a terminal".into(),
+        Who::Agent(handle) if !handle.is_empty() => format!("an agent's tools ({})", crate::fetch::untrusted(&handle)),
+        Who::Agent(_) => "an agent's tools".into(),
+        Who::Unplaced(_) => "a process cockpit cannot place".into(),
+    }
+}
+
+/// A notification a client sent, as the window shows it: its click and buttons only bring something into view (an
+/// act becomes the row it is about), and its words are plain text that names who sent them, never cockpit's own.
+fn from_a_client(n: &Value, sender: &str) -> Value {
+    let words = |v: &Value| crate::fetch::untrusted(v.as_str().unwrap_or_default());
+    let line = |v: &Value| words(v).split_whitespace().collect::<Vec<_>>().join(" ");
+    let action = cockpit_core::notify::to_view(n["action"].as_str().unwrap_or_default());
+    let row = Some(cockpit_core::notify::to_view(n["row"].as_str().unwrap_or_default())).filter(|r| !r.is_empty()).unwrap_or_else(|| action.clone());
+    let buttons: Vec<String> = n["buttons"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|b| {
+            let (label, target) = b.as_str()?.split_once('=')?;
+            let target = cockpit_core::notify::to_view(target);
+            let label = line(&json!(label)).replace('=', " ");
+            (!target.is_empty() && !label.is_empty()).then(|| format!("{label}={target}"))
+        })
+        .collect();
+    json!({"title": format!("From {sender}: {}", line(&n["title"])), "body": words(&n["body"]), "action": action, "row": row, "buttons": buttons, "from": sender})
 }
 
 /// Asks the subscribers of the app's view to bring this target into view.
@@ -309,6 +345,17 @@ mod tests {
         assert!(notify(&json!({"title": "hi"})));
         let lines: Vec<String> = rx.try_iter().filter(|l| !l.is_empty()).collect();
         assert_eq!(serde_json::from_str::<Value>(&lines[0]).unwrap()["notify"]["title"], "hi");
+    }
+
+    #[test]
+    fn a_client_s_notification_navigates_only_in_its_own_plain_words() {
+        let n = json!({"title": "✅ Tests\npassed", "body": "line\u{7}", "action": "update", "row": "", "level": "success",
+                       "buttons": ["Merge=act:merge:https://github.com/acme/api/pull/4", "Bad=resume", "x=y=space:inbox", "=space:inbox"]});
+        let shown = from_a_client(&n, "an agent's tools (app:t3)");
+        assert_eq!(shown["title"], "From an agent's tools (app:t3): ✅ Tests passed");
+        assert_eq!((shown["body"].as_str(), shown["action"].as_str(), shown["row"].as_str()), (Some("line"), Some(""), Some("")));
+        assert_eq!(shown["buttons"], json!(["Merge=inbox:https://github.com/acme/api/pull/4"]), "a label that holds = is not a target");
+        assert!(shown.get("level").is_none(), "only the fields it shows, as plain text");
     }
 
     #[test]

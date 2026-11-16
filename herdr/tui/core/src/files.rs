@@ -38,9 +38,38 @@ pub fn write(path: &Path, value: &Value) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("tmp");
+    // A temporary file of this write's own: two writers of one file never mix their bytes, the last rename wins.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("{}-{n}.tmp", std::process::id()));
     std::fs::write(&tmp, serde_json::to_string(value)?)?;
-    std::fs::rename(tmp, path)
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// Runs `f` while this process holds `<path>.lock`, so one writer at a time, across processes, reads and writes
+/// `path`. A lock held past 10 s is taken as left behind by a writer that died.
+pub fn locked<T>(path: &Path, f: impl FnOnce() -> T) -> T {
+    let lock = path.with_extension("lock");
+    if let Some(dir) = lock.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let start = std::time::Instant::now();
+    loop {
+        if std::fs::OpenOptions::new().write(true).create_new(true).open(&lock).is_ok() {
+            break;
+        }
+        let old = std::fs::metadata(&lock).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() >= 10);
+        if old || start.elapsed().as_secs() >= 10 {
+            let _ = std::fs::remove_file(&lock);
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    let out = f();
+    let _ = std::fs::remove_file(&lock);
+    out
 }
 
 /// The config as the mod resolved it, or the raw file before any session has run.

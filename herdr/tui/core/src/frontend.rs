@@ -211,18 +211,42 @@ pub fn app_space_named(name: &str) -> Option<String> {
     app_spaces().into_iter().find(|s| s["name"] == name).and_then(|s| s["id"].as_str().map(str::to_string))
 }
 
-/// Shows the cockpit layout's block for an app (`inbox`, `runbook`, `todo`, ...), switching to the cockpit layout first.
-/// The mod's sidebar does it (`cockpit.go:<app>`), so it shows which one is in front.
-pub fn app_show(child: &str) -> bool {
-    if app_status().is_some_and(|s| s["layout"] != "cockpit") {
-        app_do("layout.switch", &json!({"name": "cockpit"}));
-    }
-    app_do(&format!("cockpit.go:{child}"), &json!({})).is_some() || app_do("layout.select", &json!({"stack": STACK, "child": child})).is_some()
+/// The cockpit layouts: each name, and the stack that holds its screens.
+const COCKPIT_LAYOUTS: [(&str, &str); 2] = [("cockpit", STACK), ("cockpit-chat", "screen")];
+
+/// The cockpit layout a shown layout is, or is a copy of (`cockpit-chat-copy`): its name and its screens' stack.
+pub fn cockpit_layout(shown: &str) -> Option<(&'static str, &'static str)> {
+    COCKPIT_LAYOUTS.iter().copied().filter(|(name, _)| shown == *name || shown.starts_with(&format!("{name}-"))).max_by_key(|(name, _)| name.len())
 }
 
-/// Shows the work area, where the spaces' tabs are.
+/// The commands that show an app's screen, in order: a cockpit layout shows it in its own stacks, any other switches to
+/// the cockpit layout first. `shown` is the layout in front, None when no window answers.
+pub fn show_plan(shown: Option<&str>, child: &str) -> Vec<(String, Value)> {
+    let mut plan = Vec::new();
+    if shown.is_some_and(|s| cockpit_layout(s).is_none()) {
+        plan.push(("layout.switch".to_string(), json!({"name": "cockpit"})));
+    }
+    plan.push((format!("cockpit.go:{child}"), json!({})));
+    plan
+}
+
+/// Shows an app's screen (`inbox`, `runbook`, `todo`, ...) in whichever cockpit layout is in front, through the mod's
+/// `cockpit.go:<app>`, so the mod knows which screen is in front; another layout gives way to the cockpit one.
+pub fn app_show(child: &str) -> bool {
+    let shown = app_status().and_then(|s| s["layout"].as_str().map(str::to_string));
+    let plan = show_plan(shown.as_deref(), child);
+    let mut shown_ok = false;
+    for (command, args) in &plan {
+        shown_ok = app_do(command, args).is_some();
+    }
+    let stack = shown.as_deref().and_then(cockpit_layout).map_or(STACK, |(_, stack)| stack);
+    shown_ok || app_do("layout.select", &json!({"stack": stack, "child": child})).is_some()
+}
+
+/// Shows where you deal with an agent in the cockpit layout in front: the work area's panes, or the reading layout's
+/// chat (the mod's `go:work`).
 pub fn app_show_work() {
-    if app_status().is_some_and(|s| s["layout"] == "cockpit") {
+    if app_status().is_some_and(|s| s["layout"].as_str().and_then(cockpit_layout).is_some()) {
         app_do("cockpit.go:work", &json!({}));
     }
 }
@@ -291,6 +315,7 @@ pub fn status_mark(status: &str) -> Option<&'static str> {
     Some(match status {
         "working" => "◐",
         "blocked" => "⏸",
+        "failed" | "error" => "✗",
         "done" => "✓",
         "idle" => "○",
         _ => return None,
@@ -373,6 +398,19 @@ pub fn actions_tab(pinned: &[String], cwd: &str, label: &str) -> Option<String> 
     }
 }
 
+/// A new tab, in view, in this space: a herdr workspace id, or the app's space id after `app:`; its handle.
+pub fn new_tab(space: &str, cwd: &str, label: &str) -> Option<String> {
+    match space.strip_prefix(APP) {
+        Some(id) => {
+            let made = app_do("tab.new", &json!({"space": id, "folder": cwd, "name": label}))?;
+            app_show_work();
+            app_do("space.select", &json!({"id": id}));
+            app_handle(&made)
+        }
+        None => root_pane(&herdr(&["tab", "create", "--workspace", space, "--cwd", cwd, "--label", label, "--focus"])?),
+    }
+}
+
 fn rename_tab(handle: &str, name: &str) {
     if let Some((_, tab)) = handle.strip_prefix(APP).and_then(app_place) {
         app_do("tab.rename", &json!({"id": tab, "name": name}));
@@ -436,14 +474,17 @@ pub fn app_prompt(terminal: &str, text: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// Whether the handle's terminal still runs an agent (the TUI) or still lives (the app).
+/// Whether the handle's terminal still runs an agent: herdr's pane, or the app's live terminal, says which agent.
 pub fn alive(handle: &str) -> bool {
     match handle.strip_prefix(APP) {
-        Some(terminal) => {
-            hc(&["ls"]).is_some_and(|l| l["terminals"].as_array().into_iter().flatten().any(|t| t["address"] == terminal && t["state"] == "live"))
-        }
+        Some(terminal) => hc(&["ls"]).is_some_and(|l| runs_agent(&l, terminal)),
         None => herdr(&["pane", "get", handle]).is_some_and(|f| truthy(&f["pane"]["agent"])),
     }
+}
+
+/// Whether `hc ls` shows this app terminal live with an agent in it, not a bare shell.
+fn runs_agent(listed: &Value, terminal: &str) -> bool {
+    listed["terminals"].as_array().into_iter().flatten().any(|t| t["address"] == terminal && t["state"] == "live" && truthy(&t["agent"]))
 }
 
 /// Whether the handle's pane or terminal still exists.
@@ -531,9 +572,32 @@ mod tests {
     }
 
     #[test]
+    fn showing_an_app_keeps_the_cockpit_layout_in_front() {
+        let go = |child: &str| (format!("cockpit.go:{child}"), json!({}));
+        assert_eq!(show_plan(Some("cockpit-chat"), "inbox"), [go("inbox")], "the reading layout shows it in its own stack");
+        assert_eq!(show_plan(Some("cockpit"), "todo"), [go("todo")]);
+        assert_eq!(show_plan(Some("cockpit-chat-copy"), "mail"), [go("mail")], "a copy of a cockpit layout is one");
+        assert_eq!(show_plan(Some("main"), "inbox"), [("layout.switch".to_string(), json!({"name": "cockpit"})), go("inbox")]);
+        assert_eq!(show_plan(None, "inbox"), [go("inbox")], "no window answers: nothing to switch");
+        assert_eq!(cockpit_layout("cockpit-chat-mine"), Some(("cockpit-chat", "screen")));
+        assert_eq!(cockpit_layout("cockpits"), None);
+    }
+
+    #[test]
     fn the_width_herdr_sets() {
         assert_eq!(width_in("[ui]\n  sidebar_width = 40 # wide\n"), Some(40));
         assert_eq!(width_in("sidebar_widths = 3\n"), None);
         assert_eq!(width_in("theme = \"x\"\n"), None);
+    }
+
+    #[test]
+    fn an_app_terminal_is_alive_only_with_an_agent_in_it() {
+        let listed = serde_json::json!({"terminals": [
+            {"address": "t41", "state": "live", "agent": "claude"},
+            {"address": "t42", "state": "live", "agent": null},
+            {"address": "t43", "state": "exited", "agent": "codex"}]});
+        assert!(runs_agent(&listed, "t41"));
+        assert!(!runs_agent(&listed, "t42"), "a bare shell would run a prompt as commands");
+        assert!(!runs_agent(&listed, "t43") && !runs_agent(&listed, "t9"));
     }
 }

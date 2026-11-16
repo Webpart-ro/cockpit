@@ -514,9 +514,13 @@ pub fn answer_text(name: &str, answer: &Value, block: Option<&Value>) -> String 
     }
 }
 
-/// Takes the answers waiting for this session's views: each is removed, a question's answer written back into its view
-/// so a redrawn pane does not ask again, and the texts returned in the order found.
-pub fn take_answers(dir: &Path, session: &str) -> Vec<String> {
+/// How long an answer waits for an agent busy with a question before it is dropped.
+const KEEP_FOR_SECS: f64 = 30.0 * 60.0;
+
+/// Hands the answers waiting for this session's views to `send`, oldest first, and returns what went. One taken is
+/// removed and, a question's, written back into its view so a redrawn pane does not ask again; one the agent cannot take
+/// yet because it waits on a question stays for the next round, half an hour at most; any other refusal drops it.
+pub fn hand_over(dir: &Path, session: &str, now: f64, send: &mut dyn FnMut(&str) -> Result<(), String>) -> Vec<String> {
     static ANSWER: OnceLock<Regex> = OnceLock::new();
     let re = ANSWER.get_or_init(|| Regex::new(r"^([a-z0-9][a-z0-9-]*)\.(\d+)\.answer$").unwrap());
     let mut names: Vec<String> =
@@ -532,28 +536,40 @@ pub fn take_answers(dir: &Path, session: &str) -> Vec<String> {
             continue;
         }
         let path = dir.join(&file);
-        let answer = files::load(&path);
-        let _ = std::fs::remove_file(&path);
-        let Some(answer) = answer else { continue };
+        let Some(answer) = files::load(&path) else {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        };
         let n = answer["block"].as_u64().unwrap_or(u64::MAX) as usize;
         let block = spec["blocks"].get(n).cloned();
+        let said = answer_text(&view, &answer, block.as_ref());
+        match send(&said) {
+            Err(why) if cockpit_core::deliver::is_waiting(&why) && now - answer["at"].as_f64().unwrap_or(now) < KEEP_FOR_SECS => continue,
+            Err(_) => {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+            Ok(()) => {}
+        }
+        let _ = std::fs::remove_file(&path);
         if let Some(b) = spec["blocks"].get_mut(n)
             && !REPEATED.contains(&text(answer.get("type")))
         {
             b["answered"] = answer["label"].clone();
             let _ = files::write(&spec_path, &spec);
         }
-        out.push(answer_text(&view, &answer, block.as_ref()));
+        out.push(said);
     }
     out
 }
 
-/// Hands a text to the agent at `here` as its next prompt.
-pub fn prompt(here: &Here, text: &str) -> bool {
-    match here {
-        Here::App { terminal, .. } => frontend::app_prompt(terminal, text),
-        Here::Tui { pane } => frontend::herdr(&["agent", "prompt", pane, text]).is_some(),
-    }
+/// Hands a text to the agent at `here` as its next prompt, never into a question it waits on.
+pub fn prompt(here: &Here, text: &str) -> Result<(), String> {
+    let handle = match here {
+        Here::App { terminal, .. } => format!("{}{terminal}", frontend::APP),
+        Here::Tui { pane } => pane.clone(),
+    };
+    cockpit_core::deliver::deliver(&handle, text)
 }
 
 #[cfg(test)]
@@ -597,16 +613,36 @@ mod tests {
     }
 
     #[test]
-    fn answers_are_taken_once_and_only_for_this_session() {
+    fn answers_go_once_taken_wait_on_a_question_for_a_while_and_are_dropped_otherwise() {
         let dir = tempfile::tempdir().unwrap();
         let spec = json!({"title": "t", "session": "mcp-1", "blocks": [{"type": "choice", "prompt": "Pick", "options": [{"label": "a"}, {"label": "b"}]}]});
         files::write(&dir.path().join("mine.json"), &spec).unwrap();
         files::write(&dir.path().join("theirs.json"), &json!({"session": "other", "blocks": [{"type": "confirm", "summary": "x"}]})).unwrap();
-        files::write(&dir.path().join("mine.0.answer"), &json!({"block": 0, "type": "choice", "value": "b", "label": "b"})).unwrap();
-        files::write(&dir.path().join("theirs.0.answer"), &json!({"block": 0, "type": "confirm", "value": true, "label": "yes"})).unwrap();
-        assert_eq!(take_answers(dir.path(), "mcp-1"), ["In the mine pane I picked \"b\" for: Pick."]);
-        assert!(take_answers(dir.path(), "mcp-1").is_empty());
-        assert!(dir.path().join("theirs.0.answer").exists());
+        files::write(&dir.path().join("mine.0.answer"), &json!({"block": 0, "type": "choice", "value": "b", "label": "b", "at": 1000.0})).unwrap();
+        files::write(&dir.path().join("theirs.0.answer"), &json!({"block": 0, "type": "confirm", "value": true, "label": "yes", "at": 1000.0})).unwrap();
+        // Waiting on a question: kept, and not marked answered.
+        let mut busy = |_: &str| Err(cockpit_core::deliver::waiting_note("api"));
+        assert!(hand_over(dir.path(), "mcp-1", 1010.0, &mut busy).is_empty());
+        assert!(dir.path().join("mine.0.answer").exists(), "kept until it goes");
+        assert!(files::load(&dir.path().join("mine.json")).unwrap()["blocks"][0]["answered"].is_null());
+        // Taken: gone, and its view no longer asks.
+        let mut sent = Vec::new();
+        let mut take = |t: &str| {
+            sent.push(t.to_string());
+            Ok(())
+        };
+        assert_eq!(hand_over(dir.path(), "mcp-1", 1020.0, &mut take), ["In the mine pane I picked \"b\" for: Pick."]);
+        assert!(hand_over(dir.path(), "mcp-1", 1030.0, &mut take).is_empty(), "once");
+        assert!(dir.path().join("theirs.0.answer").exists(), "another session's stays");
         assert_eq!(files::load(&dir.path().join("mine.json")).unwrap()["blocks"][0]["answered"], "b");
+        // Any other refusal, or a wait past half an hour, drops it.
+        files::write(&dir.path().join("mine.0.answer"), &json!({"block": 0, "type": "choice", "value": "a", "label": "a", "at": 1000.0})).unwrap();
+        assert!(hand_over(dir.path(), "mcp-1", 1000.0 + KEEP_FOR_SECS + 1.0, &mut busy).is_empty());
+        assert!(!dir.path().join("mine.0.answer").exists(), "too old to send");
+        files::write(&dir.path().join("mine.0.answer"), &json!({"block": 0, "type": "choice", "value": "a", "label": "a", "at": 1000.0})).unwrap();
+        let mut gone = |_: &str| Err("that agent is gone".to_string());
+        assert!(hand_over(dir.path(), "mcp-1", 1010.0, &mut gone).is_empty());
+        assert!(!dir.path().join("mine.0.answer").exists(), "never tried forever");
+        assert_eq!(sent.len(), 1);
     }
 }

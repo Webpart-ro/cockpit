@@ -4,13 +4,13 @@
 
 import { div } from "gpui-kit";
 import { h_flex, v_flex, InputState } from "gpui-base";
-import { props, closeOverlay } from "herdr";
-import { tokens, alpha, TEXT, RADIUS, Icon, Kbd, Button, Chip, CountPill, StageHeading, SearchField, KeyHints, Table, Empty, Spinner, dur } from "./ui.js";
+import { props, closeOverlay, notify } from "herdr";
+import { tokens, alpha, TEXT, RADIUS, Icon, Kbd, Button, Chip, CountPill, StageHeading, SearchField, KeyHints, Table, Empty, Spinner, dur, AgentLogo } from "./ui.js";
 import { AgentsModel, QuestionCard, QuotaBars, StageMark, Chips, STAGES, stageColor, stageAge, hours } from "./agentsui.js";
 
 export default class Recap {
   init(_props, cx) {
-    this.agents = new AgentsModel();
+    this.agents = new AgentsModel("recap");
     this.agents.loadPins();
     this.agents.follow(cx, () => this.keepSelection());
     this.tab = props()?.tab ?? "all";
@@ -63,7 +63,7 @@ export default class Recap {
     const rows = this.shown();
     const at = rows.findIndex((r) => r.terminal === this.selected);
     const next = rows[Math.max(0, Math.min(rows.length - 1, at + d))];
-    if (next) this.selected = next.terminal;
+    if (next) this.selected = this.picked = next.terminal;
     cx.notify();
   }
 
@@ -116,15 +116,21 @@ export default class Recap {
         return true;
     }
     if (!row) return false;
+    // The popup may open from a window command and take the keyboard: what acts on an agent waits for the row the person
+    // moved to or clicked, never the one the list opened on.
+    const acts = (e.key === "tab" && row.stage === "needs_you") || e.key === "r" || e.key === "f" || e.key === "e" || (/^[1-9]$/.test(e.keystroke) && Boolean(row.question?.choices?.length));
     if (e.key === "enter") {
       m.go(cx, row);
       this.dismiss();
-    } else if (e.key === "tab" && row.stage === "needs_you") m.startReply(cx, row, row.question?.choices?.find((c) => c.free)?.n ?? null);
+    } else if (e.key === "s") m.menu(row);
+    // A digit held down answers nothing: its repeats are not picks.
+    else if (/^[1-9]$/.test(e.keystroke) && e.is_held) return true;
+    else if (acts && this.picked !== row.terminal) notify({ title: "Move to it first (j/k), then press the key again", level: "info", timeout: 3000 });
+    else if (e.key === "tab" && row.stage === "needs_you") m.startReply(cx, row, row.question?.choices?.find((c) => c.free)?.n ?? null);
     else if (e.key === "r") m.act(cx, "recap", { terminal: row.terminal, force: true }, "recapping");
-    else if (e.key === "s") m.menu(row);
     else if (e.key === "f") m.act(cx, "fork", { terminal: row.terminal, place: "tab" });
     else if (e.key === "e") m.act(cx, "seen", { terminal: row.terminal });
-    else if (/^[1-9]$/.test(e.key) && row.question?.choices?.length) m.answer(cx, row, Number(e.key));
+    else if (/^[1-9]$/.test(e.keystroke) && row.question?.choices?.length) m.answer(cx, row, Number(e.keystroke), "key");
     else return false;
     return true;
   }
@@ -150,6 +156,7 @@ export default class Recap {
       .gap(10)
       .items_center()
       .child(h_flex().w(16).flex_none().justify_center().child(StageMark(id, r.stage, { size: 9 })))
+      .child(AgentLogo(r, { size: 16, tooltip: r.agent_name, id: `${id}-logo` }))
       .child(div().flex_shrink_1().min_w(0).truncate().text_size(TEXT.lg).font_semibold().text_color(k.foreground).child(r.title || r.tab?.name || r.address))
       .child(Chip(`${r.space?.name ?? ""} · ${r.tab?.name ?? ""}`, { mono: true, icon: "terminal" }))
       .when(Boolean(r.repo), (e) => e.child(div().flex_none().text_size(TEXT.sm).text_color(k.dim).child(r.repo)))
@@ -176,7 +183,7 @@ export default class Recap {
       .overflow_hidden()
       .cursor_pointer()
       .on_click((_e, cx) => {
-        this.selected = r.terminal;
+        this.selected = this.picked = r.terminal;
         this.handle.focus();
         cx.notify();
       })
@@ -291,7 +298,7 @@ export default class Recap {
               })
               .child(SearchField(this.filter, { active: this.filtering, kbd: "/" })),
           )
-          .when(Boolean(this.agents.value?.quota?.length), (e) => e.child(div().w(220).flex_none().child(QuotaBars(this.agents.value.quota, { id: "recap-quota" }))))
+          .when(Boolean(this.agents.value?.quota?.length || this.agents.rows.length), (e) => e.child(div().w(220).flex_none().child(QuotaBars(this.agents.value?.quota, { id: "recap-quota", compact: true, tightest: true, rows: this.agents.rows }))))
           .child(Button("recap-close", { icon: "x", variant: "ghost", size: "icon-sm", tooltip: "Close  esc", onClick: () => this.dismiss() })),
       )
       .child(

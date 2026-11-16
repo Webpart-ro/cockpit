@@ -58,6 +58,8 @@ impl Sandbox {
         executable(&sandbox.root.join("bin/notify"), &fake("notify", &log, &[]));
         // herdr's client on a terminal of its own, and a Ghostty that answers AppleScript: the real ones stay untouched.
         executable(&sandbox.root.join("bin/ps"), "#!/bin/sh\nprintf '%s\\n' '??       /opt/homebrew/bin/herdr server' 'ttys007  herdr'\n");
+        // That herdr runs whether or not one runs on this machine, so its panes are listed; the rest asks the real pgrep.
+        executable(&sandbox.root.join("bin/pgrep"), "#!/bin/sh\n[ \"$*\" = '-x herdr' ] && exit 0\nexec /usr/bin/pgrep \"$@\"\n");
         executable(&sandbox.root.join("bin/osascript"), &fake("osascript", &log, &[]));
         sandbox.herdr(&[]);
         sandbox

@@ -1,7 +1,7 @@
 //! The plugin's shell scripts that start the binary: app.sh and cockpit.sh find it, fetch-apps.sh installs it from a
 //! release (served here by a small HTTP server) or has a binary do it, update.sh stops the spaces' supervisors, their
 //! apps and the hub, pin-spaces.sh orders the spaces, browse.sh and shots.sh hand their arguments to the cockpit command,
-//! and palette.sh opens the palette popup over the pane in view.
+//! palette.sh opens the palette popup over the pane in view, and whats-new.sh the popup after an update.
 
 mod common;
 
@@ -134,6 +134,27 @@ fn palette_opens_its_popup_told_of_the_pane_below() {
 }
 
 // ---------------------------------------------------------------------------
+// whats-new.sh
+
+#[test]
+fn whats_new_opens_its_popup_only_while_an_update_waits_to_be_shown() {
+    for (pending, opened) in [(0, true), (1, false)] {
+        let sandbox = Sandbox::new();
+        for name in ["whats-new.sh", "lib.sh", "cockpit.sh"] {
+            sandbox.copy_script(name);
+        }
+        executable(&sandbox.root.join("herdr/bin/cockpit"), &common::fake("cockpit", &sandbox.log(), &[("options pending", &format!("    exit {pending}"))]));
+        sandbox.herdr(&[]);
+        assert_eq!(sandbox.sh("whats-new.sh", &[], &[]).status.code(), Some(0));
+        let mut expected = vec!["cockpit options pending".to_string()];
+        if opened {
+            expected.push("herdr plugin pane open --plugin cockpit --entrypoint whats-new --placement popup".into());
+        }
+        assert_eq!(sandbox.calls(), expected);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // update.sh
 
 /// The pattern update.sh hands `pkill -f` on the line naming what it stops.
@@ -146,14 +167,10 @@ fn killed(what: &str) -> regex::Regex {
 #[test]
 fn update_stops_every_space_app_and_nothing_else() {
     let apps = killed("cockpit-space");
-    for line in [
-        "/x/herdr/bin/cockpit inbox cockpit-space",
-        "/x/herdr/bin/cockpit runbook cockpit-space",
-        "/x/herdr/tui/target/release/cockpit meetings cockpit-space",
-        "cockpit todo cockpit-space",
-        "/x/herdr/bin/cockpit monitor cockpit-space",
-        "/x/herdr/bin/cockpit routines cockpit-space",
-    ] {
+    for app in cockpit_core::SPACE_APPS {
+        assert!(apps.is_match(&format!("/x/herdr/bin/cockpit {app} cockpit-space")), "{app}");
+    }
+    for line in ["/x/herdr/tui/target/release/cockpit meetings cockpit-space", "cockpit todo cockpit-space"] {
         assert!(apps.is_match(line), "{line}");
     }
     for line in ["/x/herdr/bin/cockpit show demo", "/x/herdr/bin/cockpit hub", "/x/herdr/bin/cockpit actions sidebar", "/x/herdr/bin/cockpit space inbox"] {
@@ -164,14 +181,10 @@ fn update_stops_every_space_app_and_nothing_else() {
 #[test]
 fn update_stops_every_spaces_supervisor_and_nothing_else() {
     let supervisors = killed("cockpit space");
-    for line in [
-        "/x/herdr/bin/cockpit space inbox",
-        "/x/herdr/tui/target/release/cockpit space meetings",
-        "cockpit space todo",
-        "/x/cockpit space runbook",
-        "/x/herdr/bin/cockpit space monitor",
-        "/x/herdr/bin/cockpit space routines",
-    ] {
+    for app in cockpit_core::SPACE_APPS {
+        assert!(supervisors.is_match(&format!("/x/herdr/bin/cockpit space {app}")), "{app}");
+    }
+    for line in ["/x/herdr/tui/target/release/cockpit space meetings", "cockpit space todo", "/x/cockpit space runbook"] {
         assert!(supervisors.is_match(line), "{line}");
     }
     for line in ["/x/herdr/bin/cockpit inbox cockpit-space", "/x/herdr/bin/cockpit space inbox extra", "/x/herdr/bin/cockpit hub", "/x/notcockpit space inbox"]
