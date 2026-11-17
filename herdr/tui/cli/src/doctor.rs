@@ -496,8 +496,16 @@ impl Doctor {
         // Each source with a server of cockpit's own, and tickets from a Claude session's connector otherwise.
         let inbox = self.cache.join("inbox.json");
         let mut hub_tickets = false;
-        for section in ["code", "tickets", "ci", "calendar", "platform", "observability", "datadog", "mail"] {
-            let name = self.config.as_ref().map(|c| raw(&c[section]["server"])).unwrap_or_default();
+        // Each mail account is a source of its own, by its server.
+        let mail: Vec<(String, String)> = self.config.as_ref().map_or_else(Vec::new, |c| {
+            let accounts = cockpit_connectors::mail::accounts(&c["mail"]);
+            let label = |a: &Value| if accounts.len() > 1 { format!("mail {}", raw(&a["id"])) } else { "mail".to_string() };
+            accounts.iter().map(|a| (label(a), raw(&a["server"]))).collect()
+        });
+        let sections = ["code", "tickets", "ci", "calendar", "platform", "observability", "datadog"].map(|s| (s.to_string(), String::new()));
+        for (label, server) in sections.into_iter().chain(mail) {
+            let section = if label.starts_with("mail") { "mail" } else { label.as_str() };
+            let name = if section == "mail" { server } else { self.config.as_ref().map(|c| raw(&c[section]["server"])).unwrap_or_default() };
             let entry = self.config.as_ref().map(|c| c["servers"][name.as_str()].clone()).filter(Value::is_object);
             let on = ["observability", "datadog", "code"].contains(&section) || self.config.as_ref().is_some_and(|c| c[section]["enabled"] != false);
             let Some(entry) = entry.filter(|_| on) else { continue };
@@ -505,11 +513,11 @@ impl Doctor {
             match Server::from_entry(&entry) {
                 Some(server) if server.is_ready() => {
                     hub_tickets |= section == "tickets";
-                    ok(&format!("{section} from \"{name}\" through cockpit's own connection"));
+                    ok(&format!("{label} from \"{name}\" through cockpit's own connection"));
                 }
                 Some(server) if server.login_url().is_some() => {
                     let url = server.login_url().unwrap_or_default();
-                    fail(&format!("{section}: cockpit is not logged in to {url} → cockpit connector login {name}"))
+                    fail(&format!("{label}: cockpit is not logged in to {url} → cockpit connector login {name}"))
                 }
                 _ => fail(&format!("servers.\"{name}\" has no url or command → cockpit setup")),
             }
@@ -779,11 +787,14 @@ impl Doctor {
                 fail(&format!("no allow rule for {server}: background refreshes are refused → add \"{rule}\" to permissions.allow"));
             }
         }
-        // Mail through a Claude connector: its mapped tools one by one, so the server's sending tools stay asked.
-        let mail = &set["mail"];
-        let mail_server = raw(or(&mail["server"], &Value::from("")));
-        let hub_mail = self.config.as_ref().is_some_and(|c| c["servers"][mail_server.as_str()].is_object());
-        if is_true(or(&mail["enabled"], &Value::Bool(false))) && !mail_server.is_empty() && !hub_mail {
+        // Mail through a Claude connector: each account's mapped tools one by one, so the server's sending tools stay asked.
+        let mail_on = is_true(or(&set["mail"]["enabled"], &Value::Bool(false)));
+        for mail in cockpit_connectors::mail::accounts(&set["mail"]).iter().filter(|_| mail_on) {
+            let mail_server = raw(or(&mail["server"], &Value::from("")));
+            let hub_mail = self.config.as_ref().is_some_and(|c| c["servers"][mail_server.as_str()].is_object());
+            if mail_server.is_empty() || hub_mail {
+                continue;
+            }
             let prefix = format!("mcp__{}", rule_name(&mail_server));
             let mut tools: Vec<&str> = ["listInbox", "get", "archive", "markRead"].iter().filter_map(|v| mail["tools"][*v]["tool"].as_str()).collect();
             tools.dedup();

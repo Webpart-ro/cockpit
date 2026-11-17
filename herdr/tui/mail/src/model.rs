@@ -2,7 +2,7 @@
 //! ones, each group newest first.
 
 use chrono::{DateTime, Utc};
-use cockpit_connectors::mail::unescape;
+use cockpit_connectors::mail::{account_of, key_of, unescape};
 use serde_json::Value;
 
 /// What the space shows of the hub's `mail` document.
@@ -17,7 +17,10 @@ pub struct Mail {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Message {
+    /// Its key across accounts (see `cockpit_connectors::mail::key`), what the space selects and keeps its thread by.
     pub id: String,
+    /// The account it came from.
+    pub account: String,
     pub from: String,
     pub name: String,
     pub subject: String,
@@ -42,7 +45,8 @@ impl Mail {
             .flatten()
             .filter(|m| m["id"].as_str().is_some_and(|id| !id.is_empty()))
             .map(|m| Message {
-                id: s(m, "id"),
+                id: key_of(m),
+                account: account_of(m).to_string(),
                 from: s(m, "from"),
                 name: Some(s(m, "fromName")).filter(|n| !n.is_empty()).unwrap_or_else(|| s(m, "from")),
                 subject: unescape(&s(m, "subject")),
@@ -54,9 +58,9 @@ impl Mail {
             })
             .collect();
         messages.sort_by_key(|m| (m.group(), std::cmp::Reverse(m.date)));
-        let mut shown = [0usize; 2];
+        let mut shown = std::collections::HashMap::new();
         messages.retain(|m| {
-            let n = &mut shown[m.group() as usize];
+            let n = shown.entry((m.account.clone(), m.group())).or_insert(0usize);
             *n += 1;
             *n <= PER_GROUP
         });
@@ -72,13 +76,13 @@ impl Mail {
     }
 }
 
-/// How many messages each group lists, the latest.
+/// How many messages each group lists in each account, the latest.
 pub const PER_GROUP: usize = 15;
 
 /// The list's groups in their order: key, label.
 pub const GROUPS: [(Group, &str, &str); 2] = [(Group::Unread, "unread", "Unread"), (Group::Read, "read", "Read")];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Group {
     Unread,
     Read,
@@ -129,8 +133,13 @@ mod tests {
         assert_eq!(mail.unread(), 3);
         assert_eq!((mail.messages[3].name.as_str(), mail.messages[3].title()), ("sam@example.com", "(no subject)"));
         let many: Vec<Value> = (0..20).map(|i| json!({"id": format!("r{i}"), "date": format!("2026-11-04T10:{i:02}:00Z"), "unread": false})).collect();
-        let read = Mail::parse(Some(&json!({"messages": many})));
+        let read = Mail::parse(Some(&json!({"messages": many.clone()})));
         assert_eq!((read.messages.len(), read.messages[0].id.as_str()), (PER_GROUP, "r19"), "the latest of each group only");
+        let two: Vec<Value> =
+            many.iter().cloned().chain(many.iter().map(|m| json!({"account": "work", "id": m["id"], "date": m["date"], "unread": false}))).collect();
+        let both = Mail::parse(Some(&json!({"messages": two})));
+        assert_eq!(both.messages.len(), 2 * PER_GROUP, "each account keeps its latest");
+        assert!(both.message("work:r19").is_some_and(|m| m.account == "work") && both.message("r19").is_some_and(|m| m.account == "default"));
         assert_eq!((mail.error.as_deref(), mail.at), (Some("Mail: HTTP 502"), Some(5)));
         assert!(Mail::parse(None).messages.is_empty());
         let now = DateTime::parse_from_rfc3339("2026-11-04T11:00:00Z").unwrap().with_timezone(&Utc);

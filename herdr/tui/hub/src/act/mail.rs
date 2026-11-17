@@ -1,6 +1,6 @@
 //! Mail acted on from the mail space: a message opened in the mail client, its thread read whole, archived or marked
-//! read through the hub's own mail server (else by a Claude Code session), or answered by an agent that drafts the reply
-//! for me to review.
+//! read through the hub's own server for the message's account (else by a Claude Code session), or answered by an agent
+//! that drafts the reply for me to review.
 
 use cockpit_connectors::mail;
 use cockpit_connectors::tools::Mapped;
@@ -15,11 +15,18 @@ use crate::value::{Res, text};
 /// A thread asked of a Claude Code session is asked again after this long without an answer.
 const ASK_AGAIN_MS: u64 = 3 * 60_000;
 
-/// The hub's mail server and the mail mapping.
-fn served() -> Res<(cockpit_connectors::Server, Value)> {
+/// The hub's server for the message's account, and that account's mapping.
+fn served(message: &Value) -> Res<(cockpit_connectors::Server, Value)> {
     let raw = files::load(&files::config_dir().join("config.json")).unwrap_or(Value::Null);
-    let server = crate::feed::mcp::server(&raw, &config::load().0, "mail").ok_or("no mail server cockpit reaches: map one with cockpit setup")?;
-    Ok((server, mail::mapping(&raw["mail"])))
+    let account = mail::account_of(message);
+    let (server, account) =
+        crate::feed::mcp::mail_account(&raw, &config::load().0, account).ok_or("no mail server cockpit reaches: map one with cockpit setup")?;
+    Ok((server, mail::mapping(&account)))
+}
+
+/// The display name of the message's account, as the config lists it.
+fn account_name(ctx: &Ctx, message: &Value) -> Value {
+    mail::account(&ctx.cfg.0["mail"], mail::account_of(message)).map_or_else(|| ctx.cfg.0["mail"]["name"].clone(), |a| a["name"].clone())
 }
 
 fn message(args: &[Value]) -> Res<Value> {
@@ -30,12 +37,12 @@ fn message(args: &[Value]) -> Res<Value> {
     Ok(message.clone())
 }
 
-/// The store's `mail` document with that message changed by `f`, or left out when `f` says None.
-fn change(id: &str, f: impl Fn(&Value) -> Option<Value>) {
+/// The store's `mail` document with the message of that key changed by `f`, or left out when `f` says None.
+fn change(key: &str, f: impl Fn(&Value) -> Option<Value>) {
     crate::store::global().update("mail", |doc| {
         let mut doc = doc.clone();
         if let Some(messages) = doc["messages"].as_array_mut() {
-            *messages = messages.iter().filter_map(|m| if m["id"] == id { f(m) } else { Some(m.clone()) }).collect();
+            *messages = messages.iter().filter_map(|m| if mail::key_of(m) == key { f(m) } else { Some(m.clone()) }).collect();
         }
         doc
     });
@@ -61,10 +68,10 @@ pub fn open(ctx: &mut Ctx, args: &[Value]) -> Res {
 /// `mail_archive [message]`.
 pub fn archive(ctx: &mut Ctx, args: &[Value]) -> Res {
     let message = message(args)?;
-    let id = text(&message["id"]);
+    let id = mail::key_of(&message);
     // The list shows it done at once; the server or a session's connector does it meanwhile, a failure brings it back.
     change(&id, |_| None);
-    match served() {
+    match served(&message) {
         Ok((server, mapping)) => {
             let done = crate::feed::mcp::with(&server, async |c| mail::archive(&Mapped { connection: c, section: &mapping }, &message).await);
             undo_on_failure(&id, &message, done)?;
@@ -75,13 +82,13 @@ pub fn archive(ctx: &mut Ctx, args: &[Value]) -> Res {
     Ok(())
 }
 
-/// Puts the message back as it was when its change failed, newest first again.
-fn undo_on_failure(id: &str, message: &Value, done: Result<(), String>) -> Res {
+/// Puts the message of that key back as it was when its change failed, newest first again.
+fn undo_on_failure(key: &str, message: &Value, done: Result<(), String>) -> Res {
     if done.is_err() {
         crate::store::global().update("mail", |doc| {
             let mut doc = doc.clone();
             if let Some(messages) = doc["messages"].as_array_mut() {
-                messages.retain(|m| m["id"] != id);
+                messages.retain(|m| mail::key_of(m) != key);
                 messages.push(message.clone());
                 messages.sort_by(|a, b| text(&b["date"]).cmp(&text(&a["date"])));
             }
@@ -94,13 +101,13 @@ fn undo_on_failure(id: &str, message: &Value, done: Result<(), String>) -> Res {
 /// `mail_read [message]`: marked read.
 pub fn read(ctx: &mut Ctx, args: &[Value]) -> Res {
     let message = message(args)?;
-    let id = text(&message["id"]);
+    let id = mail::key_of(&message);
     change(&id, |m| {
         let mut m = m.clone();
         m["unread"] = false.into();
         Some(m)
     });
-    match served() {
+    match served(&message) {
         Ok((server, mapping)) => {
             let done = crate::feed::mcp::with(&server, async |c| mail::mark_read(&Mapped { connection: c, section: &mapping }, &message).await);
             undo_on_failure(&id, &message, done)?;
@@ -111,11 +118,11 @@ pub fn read(ctx: &mut Ctx, args: &[Value]) -> Res {
     Ok(())
 }
 
-/// `mail_thread [message]`: the message's whole thread read into ~/.cache/cockpit/mail/<id>.json, through the hub's
-/// mail server at once, else asked of a Claude Code session; the `mail-thread` view shows it once there.
+/// `mail_thread [message]`: the message's whole thread read into ~/.cache/cockpit/mail/<key>.json, through the hub's
+/// server for its account at once, else asked of a Claude Code session; the `mail-thread` view shows it once there.
 pub fn thread(ctx: &mut Ctx, args: &[Value]) -> Res {
     let message = message(args)?;
-    let id = text(&message["id"]);
+    let id = mail::key_of(&message);
     kept::prune_threads();
     let path = kept::thread_path(&id);
     if kept::kept_fresh(&message) {
@@ -123,7 +130,7 @@ pub fn thread(ctx: &mut Ctx, args: &[Value]) -> Res {
     }
     let asked = path.with_extension("asked");
     let now = crate::feed::now_ms();
-    match served() {
+    match served(&message) {
         Ok((server, mapping)) => {
             let read = crate::feed::mcp::with(&server, async |c| mail::thread(&Mapped { connection: c, section: &mapping }, &mapping, &message).await);
             let failed = read.as_ref().err().cloned();
@@ -143,29 +150,34 @@ pub fn thread(ctx: &mut Ctx, args: &[Value]) -> Res {
     }
 }
 
-/// A change a Claude Code session's mail connector makes, filed as a request, when the hub reaches no mail server.
+/// A change a Claude Code session's mail connector makes, filed as a request, when the hub reaches no server for the
+/// message's account.
 fn by_session(ctx: &mut Ctx, kind: &str, message: &Value, working: &str) -> Res {
-    let id = text(&message["id"]);
-    let payload = serde_json::json!({"type": kind, "label": text(&message["subject"]), "message": id});
-    inbox::request(ctx, payload, &format!("mail:{id}"), working)
+    let mut payload = serde_json::json!({"type": kind, "label": text(&message["subject"]), "message": text(&message["id"])});
+    if message["account"].is_string() {
+        payload["account"] = message["account"].clone();
+    }
+    inbox::request(ctx, payload, &format!("mail:{}", mail::key_of(message)), working)
 }
 
 /// `mail_reply [message]`: an agent session in the actions space drafts a reply from the whole message, and sends
 /// nothing.
 pub fn reply(ctx: &mut Ctx, args: &[Value]) -> Res {
     let listed = message(args)?;
-    let read = match served() {
+    let key = mail::key_of(&listed);
+    let read = match served(&listed) {
         Ok((server, mapping)) if mapping["tools"]["get"]["tool"].is_string() => {
-            crate::feed::mcp::with(&server, async |c| mail::get(&Mapped { connection: c, section: &mapping }, &mapping, &listed).await).unwrap_or(listed)
+            crate::feed::mcp::with(&server, async |c| mail::get(&Mapped { connection: c, section: &mapping }, &mapping, &listed).await)
+                .unwrap_or(listed.clone())
         }
-        _ => listed,
+        _ => listed.clone(),
     };
-    let kept = files::load(&kept::thread_path(&text(&read["id"])));
+    let kept = files::load(&kept::thread_path(&key));
     let body = Some(thread_text(kept.as_ref()))
         .filter(|b| !b.is_empty())
         .or_else(|| Some(text(&read["body"])).filter(|b| !b.is_empty()))
         .unwrap_or_else(|| text(&read["snippet"]));
-    let prompt = reply_prompt(&read, &body, &ctx.cfg.0["mail"]["name"]);
+    let prompt = reply_prompt(&read, &body, &account_name(ctx, &listed));
     let first = who(&read).split_whitespace().next().unwrap_or("mail").to_lowercase();
     let subject: String = text(&read["subject"]).chars().take(24).collect();
     let label = format!("reply {first} {subject}").trim().to_string();

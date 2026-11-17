@@ -1,9 +1,11 @@
 //! The mail for the Herdr app's cockpit mod: the `mail` view (the messages grouped "Unread" above "Read", each with
-//! its age and actions) and the `mail-thread` view (one message's thread, its HTML sanitized, for the reading panel).
+//! its age, account and actions, and the accounts with their unread counts) and the `mail-thread` view (one message's
+//! thread, its HTML sanitized, for the reading panel).
 
 use std::path::PathBuf;
 
 use chrono::{DateTime, Local, Utc};
+use cockpit_connectors::mail;
 use cockpit_core::files;
 use serde_json::{Value, json};
 
@@ -21,9 +23,10 @@ pub fn view(_args: &Value, doc: &dyn Fn(&str) -> Value) -> Value {
     model(data.as_ref(), &files::config(), Utc::now())
 }
 
-/// Whether the mail mapping has a tool for this verb (`archive`, `markRead`).
-fn maps(config: &Value, verb: &str) -> bool {
-    let tools = &config["mail"]["tools"];
+/// Whether the mapping of the message's account has a tool for this verb (`archive`, `markRead`).
+pub fn maps(config: &Value, account: &str, verb: &str) -> bool {
+    let section = mail::account(&config["mail"], account).unwrap_or_else(|| config["mail"].clone());
+    let tools = &section["tools"];
     tools[verb]["tool"].as_str().is_some_and(|t| !t.is_empty()) || tools.as_array().is_some_and(|t| t.iter().any(|t| t == verb))
 }
 
@@ -31,10 +34,10 @@ fn maps(config: &Value, verb: &str) -> bool {
 pub fn acts(m: &Message, config: &Value) -> Vec<Value> {
     let mut acts =
         vec![json!({"id": "see", "label": "Open", "key": "enter", "main": true}), json!({"id": "reply", "label": "Reply", "key": "c", "main": false})];
-    if maps(config, "archive") {
+    if maps(config, &m.account, "archive") {
         acts.push(json!({"id": "archive", "label": "Archive", "key": "b", "main": false}));
     }
-    if m.unread && maps(config, "markRead") {
+    if m.unread && maps(config, &m.account, "markRead") {
         acts.push(json!({"id": "read", "label": "Mark read", "key": "m", "main": false}));
     }
     acts.push(json!({"id": "page", "label": "Web page", "key": "h", "main": false}));
@@ -54,12 +57,13 @@ pub fn model(data: Option<&Value>, config: &Value, now: DateTime<Utc>) -> Value 
         .iter()
         .map(|m| {
             json!({
-                "id": m.id, "from": m.from, "fromName": m.name, "subject": m.title(), "snippet": m.snippet, "url": m.url,
+                "id": m.id, "account": m.account, "from": m.from, "fromName": m.name, "subject": m.title(), "snippet": m.snippet, "url": m.url,
                 "date": m.raw["date"], "age": age(m.date, now), "unread": m.unread, "raw": m.raw, "acts": acts(m, config),
             })
         })
         .collect();
     json!({
+        "accounts": accounts(data, config, &mail),
         "waiting": data.is_none_or(|d| !d.is_object()),
         "enabled": enabled,
         "updated": updated,
@@ -68,6 +72,36 @@ pub fn model(data: Option<&Value>, config: &Value, now: DateTime<Utc>) -> Value 
         "groups": GROUPS.iter().map(|(group, key, label)| json!({"key": key, "label": label, "ids": ids(*group)})).collect::<Vec<_>>(),
         "messages": messages,
     })
+}
+
+/// The accounts the list holds mail of, as `{id, name, unread, total, updated, error}`: the config's in its order, then
+/// any other the document names (a config the mod has not resolved yet).
+fn accounts(data: Option<&Value>, config: &Value, mail: &Mail) -> Vec<Value> {
+    let states: Vec<Value> = data.and_then(|d| d["accounts"].as_array()).cloned().unwrap_or_default();
+    let mut listed: Vec<(String, String)> = Vec::new();
+    let configured = mail::accounts(&config["mail"]);
+    let named =
+        configured.iter().chain(states.iter()).filter_map(|a| Some((a["id"].as_str()?.to_string(), a["name"].as_str().unwrap_or_default().to_string())));
+    let held = mail.messages.iter().map(|m| (m.account.clone(), String::new()));
+    for (id, name) in named.chain(held) {
+        if !listed.iter().any(|(known, _)| *known == id) {
+            listed.push((id, name));
+        }
+    }
+    listed
+        .into_iter()
+        .map(|(id, name)| {
+            let state = states.iter().find(|s| s["id"] == id.as_str()).cloned().unwrap_or(Value::Null);
+            let mine = || mail.messages.iter().filter(|m| m.account == id);
+            // A document with no account states was written whole for its one account (a session writing it alone).
+            let at = if states.is_empty() { mail.at } else { state["at"].as_i64().filter(|at| *at > 0) };
+            let updated = at.and_then(DateTime::from_timestamp_millis).map(|at| at.with_timezone(&Local).format("%H:%M").to_string());
+            json!({
+                "id": id, "name": if name.is_empty() { id.clone() } else { name }, "unread": mine().filter(|m| m.unread).count(), "total": mine().count(),
+                "updated": updated, "error": state["error"],
+            })
+        })
+        .collect()
 }
 
 /// `mail-thread {id}`: that message's thread as the reading panel draws it.
@@ -102,10 +136,11 @@ pub fn act(action: &str, args: &[Value]) -> Option<Result<String, String>> {
 }
 
 fn web_page(message: &Value) -> Result<String, String> {
-    let id = message["id"].as_str().filter(|id| !id.is_empty()).ok_or("a message needs its id")?;
-    let Thread::Ready(messages) = thread::read(id) else { return Err("the mail is still loading".into()) };
+    message["id"].as_str().filter(|id| !id.is_empty()).ok_or("a message needs its id")?;
+    let key = mail::key_of(message);
+    let Thread::Ready(messages) = thread::read(&key) else { return Err("the mail is still loading".into()) };
     let subject = message["subject"].as_str().unwrap_or_default();
-    let path = thread::page_path(id);
+    let path = thread::page_path(&key);
     std::fs::write(&path, thread::page(subject, &messages)).map_err(|e| e.to_string())?;
     files::open_url(&format!("file://{}", path.display()));
     Ok(format!("opened {subject} in the browser"))
@@ -131,8 +166,37 @@ mod tests {
         assert_eq!(ids(&view["messages"][0]), ["see", "reply", "archive", "read", "page", "open"]);
         assert_eq!(ids(&view["messages"][1]), ["see", "reply", "archive", "read", "page"]);
         assert_eq!((&view["messages"][0]["age"], &view["messages"][1]["age"]), (&json!("1h"), &json!("3h")));
+        assert_eq!(view["accounts"], json!([{"id": "default", "name": "Mail", "unread": 2, "total": 2, "updated": view["updated"], "error": null}]));
         let bare = model(None, &json!({}), now);
         assert_eq!((&bare["waiting"], &bare["enabled"]), (&json!(true), &json!(false)));
         assert_eq!(thread_json(&Thread::Loading(5))["state"], "loading");
+    }
+
+    #[test]
+    fn each_account_has_its_counts_and_its_own_actions() {
+        let data = json!({"at": 1_762_250_400_000_i64, "accounts": [{"id": "work", "name": "Acme", "at": 1_762_250_400_000_i64, "error": "Mail: timed out"}],
+        "messages": [
+            {"id": "a", "account": "work", "from": "maya@example.com", "subject": "Lunch?", "date": "2026-11-04T10:00:00Z", "unread": true},
+            {"id": "a", "account": "home", "from": "sam@example.com", "subject": "Dinner?", "date": "2026-11-04T09:00:00Z", "unread": false}
+        ]});
+        let config = json!({"mail": {"enabled": true, "accounts": [
+            {"id": "home", "name": "Home", "server": "imap-home"},
+            {"id": "work", "name": "Acme", "server": "imap-work", "tools": {"archive": {"tool": "archive"}, "markRead": {"tool": "mark_read"}}}
+        ]}});
+        let now = DateTime::parse_from_rfc3339("2026-11-04T11:00:00Z").unwrap().with_timezone(&Utc);
+        let view = model(Some(&data), &config, now);
+        let accounts: Vec<(&str, &str, u64, u64)> = view["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| (a["id"].as_str().unwrap(), a["name"].as_str().unwrap(), a["unread"].as_u64().unwrap(), a["total"].as_u64().unwrap()))
+            .collect();
+        assert_eq!(accounts, [("home", "Home", 0, 1), ("work", "Acme", 1, 1)]);
+        assert_eq!(view["accounts"][1]["error"], "Mail: timed out");
+        let ids: Vec<&str> = view["messages"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["work:a", "home:a"], "the same id in two accounts is two messages");
+        let acts = |m: &Value| m["acts"].as_array().unwrap().iter().map(|a| a["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(acts(&view["messages"][0]), ["see", "reply", "archive", "read", "page"]);
+        assert_eq!(acts(&view["messages"][1]), ["see", "reply", "page"], "home maps no archive");
     }
 }

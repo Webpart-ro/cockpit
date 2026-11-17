@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
-import { isFresh, messagesOf, threadFile, threadOf, unescape } from '../hooks/mail'
+import { mailAccounts } from '../hooks/config'
+import { hubReads, isFresh, keyOf, messagesOf, threadFile, threadOf, unescape, withAccount } from '../hooks/mail'
 import { checkRequest } from '../hooks/protocol'
 
 // Claude's Gmail connector answers search_threads with threads and, in the summary view, their latest message.
@@ -66,4 +67,32 @@ test('a kept thread is read again when a reply lands after it, or when reading i
 
 test('escaped snippets and subjects read as text', () => {
   expect(unescape('haven&#39;t &amp; R&amp;D &lt;3 &#x2019; &bogus;')).toBe("haven't & R&D <3 \u2019 &bogus;")
+})
+
+test('a mail block without accounts is the one account default; listed accounts carry their own mapping', () => {
+  expect(mailAccounts(GMAIL)).toEqual([{ id: 'default', name: 'Gmail', server: 'claude.ai Gmail', tools: {}, fields: GMAIL.fields, urlTemplate: '' }])
+  const accounts = mailAccounts({ ...GMAIL, accounts: [{ id: 'work', name: 'Acme', server: 'imap-acme' }, { id: 'home', server: 'imap-home', enabled: false }, { id: '' }] })
+  expect(accounts).toEqual([{ id: 'work', name: 'Acme', server: 'imap-acme', tools: {}, fields: {}, urlTemplate: '' }])
+})
+
+test('a session writes its account and leaves the others, keyed apart when ids clash', () => {
+  const message = (id: string, date: string, unread = true) => ({ id, threadId: id, from: 'maya@example.com', fromName: 'Maya', subject: id, snippet: '', url: '', date, unread, labels: [] })
+  const hub = { ...message('m1', '2026-11-04T10:00:00Z'), account: 'work' }
+  const state = { at: 5, by: 'hub' as const, messages: [hub], notified: ['work:m1'], accounts: [{ id: 'work', name: 'Acme', by: 'hub' as const, at: 5 }] }
+  const after = withAccount(state, { id: 'gmail', name: 'Gmail', server: 'claude.ai Gmail', tools: {}, fields: {}, urlTemplate: '' }, [message('m1', '2026-11-04T11:00:00Z')], 9)
+  expect(after.messages.map(m => keyOf(m.account, m.id))).toEqual(['gmail:m1', 'work:m1'])
+  expect(after.notified).toEqual(['gmail:m1', 'work:m1'])
+  expect(after.accounts?.map(a => [a.id, a.by])).toEqual([['work', 'hub'], ['gmail', 'session']])
+  expect(keyOf('default', 'm1')).toBe('m1')
+  expect(threadFile(keyOf('work', 'INBOX:7:42'))).toBe('work_INBOX_7_42.json')
+})
+
+test('the hub reading an account keeps the session off it, per account', () => {
+  const now = 1_000_000
+  const state = { at: now, by: 'hub' as const, messages: [], notified: [], accounts: [{ id: 'work', name: 'Acme', by: 'hub' as const, at: now - 1000 }, { id: 'gmail', name: 'Gmail', by: 'session' as const, at: now }] }
+  expect(hubReads(state, 'work', now)).toBe(true)
+  expect(hubReads(state, 'gmail', now)).toBe(false)
+  expect(hubReads({ at: now, by: 'hub', messages: [], notified: [] }, 'default', now)).toBe(true)
+  expect(hubReads({ at: now - 10 * 60_000, by: 'hub', messages: [], notified: [] }, 'default', now)).toBe(false)
+  expect(hubReads(null, 'default', now)).toBe(false)
 })

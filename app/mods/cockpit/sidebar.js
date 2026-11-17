@@ -37,7 +37,7 @@ function appBadge(app, v) {
     return of((t.alerts ?? 0) + (t.failed ?? 0), "destructive") ?? of(t.newErrors, "warning");
   }
   if (app === "routines") return of(v.tiles?.unread, v.tiles?.failing ? "destructive" : "warning");
-  if (app === "mail") return of(v.counts?.needs, "warning");
+  if (app === "mail") return of(v.counts?.unread, "warning");
   if (app === "meetings") {
     const now = Date.now();
     const left = (v.meetings ?? []).filter((m) => m.day === v.today && (m.end ?? 0) > now).length;

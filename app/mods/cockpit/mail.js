@@ -1,7 +1,9 @@
 // The mail: the `mail` view the hub pushes, asked again each minute so the ages stay true. Messages grouped "Needs you"
 // above "Updates", newest first; a double click or See opens the whole thread on the side (the `mail-thread` view, its
 // HTML sanitized by the hub and drawn natively), with Reply (an agent drafts it, nothing is sent), Archive, Mark read
-// and Open in the mail client, and every key of the TUI app.
+// and Open in the mail client, and every key of the TUI app. With several accounts, tabs over the list switch between
+// their inboxes (w cycles them), each with its unread count, and the pick survives a reload. An account the network
+// cannot reach (the Mac just woke) shows "Reconnecting…" with a spinner rather than the red error, for a few minutes.
 
 import { div } from "gpui-kit";
 import { h_flex, v_flex, TextView } from "gpui-base";
@@ -9,13 +11,26 @@ import { settings } from "herdr";
 import * as hub from "./hub.js";
 import {
   tokens, TEXT, RADIUS, Icon, Button, ListRow, PageHeader, KeyHints, Empty, ErrorState, Skeleton, Toaster, Flashes, Scroller, Hover,
-  SidePanel, Avatar, Spinner, StageHeading, openMenu, alpha, personColor,
+  SidePanel, Avatar, Spinner, StageHeading, Tabs, openMenu, alpha, personColor,
 } from "./ui.js";
 
 const ICON = { see: "eye", reply: "reply", archive: "archive", read: "mail-check", page: "globe", open: "external" };
 const HUB_ACTION = { reply: "mail_reply", archive: "mail_archive", read: "mail_read", page: "mail_page" };
 /** After this long without the thread, the panel says it is still loading. */
 const SLOW_MS = 20_000;
+/** A network error shows as "Reconnecting…" this long after the view first saw it, then as the red error it is. */
+const RECONNECT_MS = 5 * 60_000;
+/** A gap this long between two looks at the view (the Mac slept, the view was reloaded) starts that count again. */
+const SEEN_GAP_MS = 3 * 60_000;
+
+/** Whether a mail error is the network being away: imap-mcp's `network: ` marker (after its own retries), or the raw
+ * socket texts of older runs. Login refusals never are. */
+function isNetworkError(error) {
+  const text = String(error ?? "");
+  if (!text || /authenticat|invalid credentials|login failed|no password|keychain/i.test(text)) return false;
+  return /(^|[\s:;·])network: /.test(text) ||
+    /\b(ENETUNREACH|ENETDOWN|ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH)\b|socket timeout|connection not available/i.test(text);
+}
 
 const escape = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
@@ -30,6 +45,7 @@ export default class Mail {
     this.model = null;
     this.status = "connecting";
     this.sel = null;
+    this.account = this.rememberedAccount();
     this.reading = null;
     this.thread = null;
     this.threadSub = null;
@@ -40,6 +56,8 @@ export default class Mail {
     this.toasts = new Toaster();
     this.flashes = new Flashes();
     this.scroller = new Scroller();
+    /** Per account id ("" for the inbox as a whole): when this view first and last saw its network error. */
+    this.netSeen = new Map();
     this.handle = cx.focus_handle();
     this.sub = hub.subscribe(
       cx,
@@ -100,22 +118,96 @@ export default class Mail {
     return this.message(this.sel);
   }
 
+  /** The accounts the tabs switch between: none while there is only one. */
+  accounts() {
+    const accounts = this.model?.accounts ?? [];
+    return accounts.length > 1 ? accounts : [];
+  }
+
+  /** The account whose inbox shows: the one picked, else the first; null with a single account. */
+  current() {
+    const accounts = this.accounts();
+    if (!accounts.length) return null;
+    return accounts.find((a) => a.id === this.account) ?? accounts[0];
+  }
+
+  /** Whether a message is in the inbox that shows. */
+  shown(m) {
+    const account = this.current();
+    return !account || m?.account === account.id;
+  }
+
+  /** The list's groups, with only the shown inbox's messages. */
+  groups() {
+    return (this.model?.groups ?? []).map((g) => ({ ...g, ids: g.ids.filter((id) => this.shown(this.message(id))) }));
+  }
+
   ids() {
-    return (this.model?.groups ?? []).flatMap((g) => g.ids);
+    return this.groups().flatMap((g) => g.ids);
+  }
+
+  rememberedAccount() {
+    try {
+      return localStorage.getItem("mail.account") || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Shows that account's inbox, remembered across reloads; the mail being read closes when it is another account's. */
+  setAccount(cx, id) {
+    if (!id || id === this.current()?.id) return;
+    this.account = id;
+    try {
+      localStorage.setItem("mail.account", id);
+    } catch {}
+    if (this.reading && !this.shown(this.message(this.reading) ?? this.readingMessage)) this.closeReading();
+    this.sel = this.ids()[0] ?? null;
+    cx.notify();
+  }
+
+  /** The next account's inbox (`w`), or the previous one (`shift-w`). */
+  cycleAccount(cx, by) {
+    const accounts = this.accounts();
+    if (!accounts.length) return;
+    const at = Math.max(0, accounts.findIndex((a) => a.id === this.current()?.id));
+    this.setAccount(cx, accounts[(at + by + accounts.length) % accounts.length].id);
   }
 
   take(model, cx) {
     const before = this.model;
     this.model = model;
+    this.trackNetwork(model);
     // Only mail newer than any listed before flashes: a longer listing brings older mail in, which is not news.
     if (before?.messages?.length) {
       const was = new Set(before.messages.map((m) => m.id));
       const newest = Math.max(0, ...before.messages.map((m) => Date.parse(m.date) || 0));
       for (const m of this.messages()) if (!was.has(m.id) && (Date.parse(m.date) || 0) > newest) this.flashes.start(cx, m.id, tokens().ring);
     }
-    if (!this.message(this.sel)) this.sel = this.ids()[0] ?? null;
+    if (!this.message(this.sel) || !this.shown(this.message(this.sel))) this.sel = this.ids()[0] ?? null;
     // The mail being read stays open when the list moves on (read, refreshed): only archiving it or closing closes it.
     if (this.reading && this.message(this.reading)) this.readingMessage = this.message(this.reading);
+  }
+
+  /** Notes when each account's network error was first seen, starting again after a gap (a sleep) or once it is gone. */
+  trackNetwork(model) {
+    const now = Date.now();
+    const errors = [["", model?.error], ...(model?.accounts ?? []).map((a) => [a.id, a.error])];
+    const live = new Set();
+    for (const [id, error] of errors) {
+      if (!isNetworkError(error)) continue;
+      live.add(id);
+      const seen = this.netSeen.get(id);
+      if (!seen || now - seen.last > SEEN_GAP_MS) this.netSeen.set(id, { first: now, last: now });
+      else seen.last = now;
+    }
+    for (const id of [...this.netSeen.keys()]) if (!live.has(id)) this.netSeen.delete(id);
+  }
+
+  /** Whether that account's error is the network, seen for less than RECONNECT_MS: shown as reconnecting, not red. */
+  reconnecting(id, error) {
+    const seen = this.netSeen.get(id ?? "");
+    return isNetworkError(error) && Boolean(seen) && Date.now() - seen.first < RECONNECT_MS;
   }
 
   focusOn(id, cx) {
@@ -124,6 +216,7 @@ export default class Mail {
       if (id) this.toasts.push(cx, "That message is not in the inbox any more");
       return;
     }
+    if (!this.shown(m)) this.setAccount(cx, m.account);
     this.sel = m.id;
     this.flashes.start(cx, m.id, tokens().ring);
     this.openReading(cx, m);
@@ -140,7 +233,7 @@ export default class Mail {
 
   /** The first message of the other group: `]` to the updates, `[` back to what needs you. */
   group(cx, by) {
-    const groups = (this.model?.groups ?? []).filter((g) => g.ids.length);
+    const groups = this.groups().filter((g) => g.ids.length);
     const at = groups.findIndex((g) => g.ids.includes(this.sel));
     const next = groups[Math.max(0, Math.min(groups.length - 1, at + by))];
     if (next) this.sel = next.ids[0];
@@ -190,7 +283,7 @@ export default class Mail {
     if (!m || m.id === next) return;
     this.opened = null;
     hub.act("mail", "mail_read", [m.raw]).catch(() => undefined);
-    if (!next && this.sel === m.id) this.sel = (this.model?.groups ?? []).find((g) => g.key === "unread")?.ids.find((id) => id !== m.id) ?? this.sel;
+    if (!next && this.sel === m.id) this.sel = this.groups().find((g) => g.key === "unread")?.ids.find((id) => id !== m.id) ?? this.sel;
   }
 
   closeReading() {
@@ -261,6 +354,11 @@ export default class Mail {
       case "shift-r":
         cx.spawn(async (cx) => this.hubAct(cx, "request_refresh", []));
         break;
+      case "w":
+      case "shift-w":
+        if (!this.accounts().length) return false;
+        this.cycleAccount(cx, k === "w" ? 1 : -1);
+        break;
       case "shift-f10":
         if (m) this.menu(m);
         break;
@@ -318,8 +416,8 @@ export default class Mail {
   }
 
   list(k, narrow) {
-    const groups = (this.model?.groups ?? []).filter((g) => g.ids.length);
-    if (!groups.length) return Empty({ icon: "mail-check", title: "Inbox zero", description: "Nothing in the inbox." });
+    const groups = this.groups().filter((g) => g.ids.length);
+    if (!groups.length) return Empty({ icon: "mail-check", title: "Inbox zero", description: `Nothing in ${this.current()?.name ?? "the inbox"}.` });
     const rows = [];
     for (const g of groups) {
       rows.push({ height: 32, el: div().h(32).px(10).pt(6).child(StageHeading(`mail-group-${g.key}`, g.label, { color: g.key === "unread" ? k.warning : k.dim, count: g.ids.length })) });
@@ -394,11 +492,28 @@ export default class Mail {
     });
   }
 
+  /** The account tabs over the list, each with its unread count; none with a single account. */
+  accountTabs() {
+    const accounts = this.accounts();
+    if (!accounts.length) return null;
+    const items = accounts.map((a) => {
+      const waiting = this.reconnecting(a.id, a.error);
+      const label = waiting ? h_flex().gap(6).items_center().child(Spinner({ size: 14 })).child(a.name) : a.name;
+      return { value: a.id, label, icon: a.error && !waiting ? "alert" : undefined, count: a.unread || undefined };
+    });
+    return h_flex().px(24).pt(12).gap(8).flex_none().items_center().child(Tabs("mail-accounts", { items, value: this.current()?.id, onChange: (id, cx) => this.setAccount(cx, id) }));
+  }
+
   render(cx) {
     const k = tokens();
     const v = this.model;
-    const counts = v?.counts ?? {};
-    const description = !v ? "Loading…" : v.waiting ? "Waiting for the first fetch" : `${counts.unread ? `${counts.unread} unread` : "Nothing unread"}${v.updated ? ` · updated ${v.updated}` : ""}`;
+    const account = this.current();
+    const counts = account ?? v?.counts ?? {};
+    const updated = account ? account.updated : v?.updated;
+    const error = account ? account.error : v?.error;
+    const reconnecting = Boolean(error) && this.reconnecting(account ? account.id : "", error);
+    const serverName = account?.name ?? v?.accounts?.[0]?.name ?? "the mail server";
+    const description = !v ? "Loading…" : v.waiting ? "Waiting for the first fetch" : `${counts.unread ? `${counts.unread} unread` : "Nothing unread"}${updated ? ` · updated ${updated}` : ""}`;
     let root = v_flex()
       .id("mail")
       .track_focus(this.handle)
@@ -448,17 +563,22 @@ export default class Mail {
     }
     const reading = this.message(this.reading) ?? (this.reading ? this.readingMessage : null);
     const wide = this.width >= 860;
+    const tabs = this.accountTabs();
     const main = v_flex()
       .flex_1()
       .min_w(0)
       .h_full()
-      .when(Boolean(v.error), (e) =>
-        e.child(h_flex().mx(24).mt(12).px(12).py(8).gap(8).items_center().rounded(RADIUS.md).bg(alpha(k.destructive, 0.1)).text_size(TEXT.sm).text_color(k.destructive).child(Icon("alert", { size: 14 })).child(div().flex_1().truncate().child(v.error ?? ""))),
+      .when(Boolean(tabs), (e) => e.child(tabs))
+      .when(reconnecting, (e) =>
+        e.child(h_flex().mx(24).mt(12).px(12).py(8).gap(8).items_center().rounded(RADIUS.md).bg(k.muted).text_size(TEXT.sm).text_color(k.mutedFg).child(Spinner({ size: 14 })).child(div().flex_1().truncate().child(`Reconnecting to ${serverName}…`))),
+      )
+      .when(Boolean(error) && !reconnecting, (e) =>
+        e.child(h_flex().mx(24).mt(12).px(12).py(8).gap(8).items_center().rounded(RADIUS.md).bg(alpha(k.destructive, 0.1)).text_size(TEXT.sm).text_color(k.destructive).child(Icon("alert", { size: 14 })).child(div().flex_1().truncate().child(error ?? ""))),
       )
       .child(v_flex().flex_1().min_h(0).px(14).pt(8).child(this.list(k, this.width - (wide && reading ? this.panelWidth() : 0) < 900)));
     root = root
       .child(h_flex().flex_1().min_h(0).child(main).when(wide && Boolean(reading), (e) => e.child(this.reader(reading, k))))
-      .child(KeyHints([["j k", "move"], ["] [", "group"], ["⏎", "open"], ["c", "reply"], ["b", "archive"], ["m", "mark read"], ["h", "web page"], ["o", "open in mail"], ["esc", "close"]]));
+      .child(KeyHints([["j k", "move"], ["] [", "group"], ...(tabs ? [["w", "account"]] : []), ["⏎", "open"], ["c", "reply"], ["b", "archive"], ["m", "mark read"], ["h", "web page"], ["o", "open in mail"], ["esc", "close"]]));
     if (!wide && reading) {
       root = root.child(
         div()

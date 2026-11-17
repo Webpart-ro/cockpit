@@ -56,7 +56,9 @@ fn sources(c: &Value, raw: &Value, spaces: &[String]) -> Vec<&'static str> {
     if c["platform"]["enabled"] == true && !hubs("platform") {
         out.push("platform");
     }
-    if c["mail"]["enabled"] == true && server("mail") && !hubs("mail") {
+    // Mail when any account names a server the hub does not reach: a Claude connector then.
+    let by_session = |account: &Value| account["server"].as_str().is_some_and(|s| !s.is_empty()) && crate::feed::mcp::mail_server(raw, c, account).is_none();
+    if c["mail"]["enabled"] == true && cockpit_connectors::mail::accounts(&c["mail"]).iter().any(by_session) {
         out.push("mail");
     }
     if spaces.iter().any(|s| s == "monitor") && !(hubs("platform") && crate::feed::mcp::observability(raw).is_some()) {
@@ -137,5 +139,16 @@ mod tests {
         assert_eq!(sources(&config, &raw, &[]), ["ci"]);
         let raw = json!({"servers": {"linear": {"command": "linear-mcp"}, "circleci": {"command": "circleci-mcp"}}});
         assert!(sources(&config, &raw, &[]).is_empty());
+    }
+
+    #[test]
+    fn mail_needs_a_session_while_one_account_is_a_claude_connector() {
+        let raw = json!({"servers": {"imap-work": {"command": "imap-mcp"}}});
+        let single = json!({"mail": {"enabled": true, "server": "claude.ai Gmail"}});
+        assert_eq!(sources(&single, &raw, &[]), ["mail"]);
+        let mixed = json!({"mail": {"enabled": true, "accounts": [{"id": "work", "server": "imap-work"}, {"id": "gmail", "server": "claude.ai Gmail"}]}});
+        assert_eq!(sources(&mixed, &raw, &[]), ["mail"]);
+        let served = json!({"mail": {"enabled": true, "accounts": [{"id": "work", "server": "imap-work"}]}});
+        assert!(sources(&served, &raw, &[]).is_empty());
     }
 }

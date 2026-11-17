@@ -115,7 +115,26 @@ export type MailCapability = 'listInbox' | 'get' | 'archive' | 'markRead'
 export type MailFields = Partial<
   Record<'messages' | 'id' | 'threadId' | 'from' | 'fromName' | 'subject' | 'snippet' | 'url' | 'date' | 'unread' | 'labels' | 'body' | 'html' | 'thread', string>
 >
-export type Mail = { enabled: boolean; name: string; server: string; tools: Partial<Record<MailCapability, Recipe>>; fields: MailFields; urlTemplate: string }
+export type Mail = {
+  enabled: boolean
+  name: string
+  server: string
+  tools: Partial<Record<MailCapability, Recipe>>
+  fields: MailFields
+  urlTemplate: string
+  // Several mailboxes, each mapped like the block itself; without them the block is the one account `default`.
+  accounts?: MailAccountEntry[]
+}
+type MailAccountEntry = Partial<Omit<Mail, 'accounts'>> & { id: string }
+export type MailAccount = Omit<Mail, 'accounts' | 'enabled'> & { id: string }
+
+// The mailboxes a mail block reads: its accounts when it lists any (the hub's connectors mail.rs reads them the same),
+// else the block itself as the account `default`.
+export function mailAccounts(mail: Mail): MailAccount[] {
+  const listed = (mail.accounts ?? []).filter(a => a?.id && a.enabled !== false)
+  if (!listed.length) return [{ id: 'default', name: mail.name || 'Mail', server: mail.server, tools: mail.tools, fields: mail.fields, urlTemplate: mail.urlTemplate }]
+  return listed.map(a => ({ id: a.id, name: a.name || a.id, server: a.server ?? '', tools: a.tools ?? {}, fields: a.fields ?? {}, urlTemplate: a.urlTemplate ?? '' }))
+}
 
 export type Platform = {
   enabled: boolean
@@ -396,6 +415,10 @@ export async function loadConfig($: $): Promise<Config> {
   if (raw.tickets?.server && !raw.tickets.tools && /github/i.test(`${raw.tickets.name ?? ''} ${raw.tickets.server}`)) raw.tickets = { ...GITHUB_ISSUES, ...raw.tickets }
   // Likewise a Gmail connector named without a mapping gets Gmail's.
   if (raw.mail?.server && !raw.mail.tools && /gmail/i.test(raw.mail.server)) raw.mail = { ...GMAIL, ...raw.mail }
+  if (raw.mail?.accounts) {
+    const { enabled: _, ...gmail } = GMAIL
+    raw.mail = { ...raw.mail, accounts: raw.mail.accounts.map(a => (a?.server && !a.tools && /gmail/i.test(a.server) ? { ...gmail, ...a } : a)) }
+  }
   const config: Config = {
     ...DEFAULTS,
     ...raw,

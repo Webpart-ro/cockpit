@@ -36,11 +36,48 @@ itself and need no `tools`.
 | `tickets` | Your tickets: `name`, `server`, `keys` (prefixes such as `ENG`), `urlTemplate`, and `token` for refreshes with no agent session. Linear and GitHub Issues are mapped by cockpit; naming their server is enough. |
 | `ci` | CI runs: `name`, `server`, `imageJob` (the job that pushes a preview's image), `token`. Empty `server` reads GitHub checks through `gh`. |
 | `calendar` | Meetings: `server`, and `calendars` (ids such as `primary` or an address) to read more than its default calendar; or `ics` (the calendar's secret iCal address) and `email` so the hub fetches them itself. |
-| `mail` | Unread mail: `name`, `server`. A tool that sends mail is never mapped. |
+| `mail` | Unread mail: `name`, `server`, or `accounts` for several mailboxes (below). A tool that sends mail is never mapped. |
 | `platform` | Deploys and preview environments: `previewPrefix`, `previewDashboardUrl`, `workflowUrl`, `previewDefaults`. |
 | `metabase`, `datadog` | `{server}` — the connectors `show` panes refresh from. |
 | `servers` | The MCP servers cockpit calls itself, with their URL or command. Written by setup for agents other than Claude Code. |
 | `refresh` | Seconds between fetches, per source (`github`, `tickets`, `ci`, `mail`, `calendar`, `platform`, `monitor`). |
+
+### Several mailboxes
+
+`mail.accounts` lists mailboxes the mail space switches between, each `{id, name, server, tools, fields, urlTemplate}`
+mapped like the `mail` block itself (`enabled: false` hides one). Without it, the `mail` block is the one account.
+An account whose `server` is in `servers` is read by the hub itself; any other goes through a Claude Code session's
+connector, as a single mailbox does. With more than one account, tabs over the list show each inbox and its unread
+count, `w` cycles them, and notifications name the account.
+
+An IMAP mailbox needs a local MCP server for it. imap-mcp, for one, serves one mailbox per process, its password in
+the macOS Keychain, and answers with the field names cockpit reads by default, so the account maps only its `tools`:
+
+```json
+{
+  "mail": {
+    "enabled": true,
+    "accounts": [
+      {"id": "gmail", "name": "Gmail", "server": "claude.ai Gmail"},
+      {
+        "id": "work", "name": "Acme", "server": "imap-acme",
+        "tools": {
+          "listInbox": {"tool": "list_inbox"},
+          "get": {"tool": "get_message", "args": {"message": "{message}", "thread": "{thread}"}},
+          "archive": {"tool": "archive", "args": {"message": "{message}"}},
+          "markRead": {"tool": "mark_read", "args": {"message": "{message}"}}
+        }
+      }
+    ]
+  },
+  "servers": {
+    "imap-acme": {
+      "command": "node", "args": ["/path/to/imap-mcp/dist/index.js"],
+      "env": {"IMAP_ACCOUNT": "work", "IMAP_HOST": "imap.acme.example", "IMAP_USER": "me@acme.example"}
+    }
+  }
+}
+```
 
 ## What cockpit does on its own
 

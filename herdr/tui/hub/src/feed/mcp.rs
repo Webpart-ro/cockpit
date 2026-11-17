@@ -4,7 +4,7 @@
 
 use cockpit_connectors::observability::{self, Signals};
 use cockpit_connectors::tools::Mapped;
-use cockpit_connectors::{Connection, Server, block_on, calendar, ci, connect, monitor, platform, tickets};
+use cockpit_connectors::{Connection, Server, block_on, calendar, ci, connect, mail, monitor, platform, tickets};
 use serde_json::Value;
 
 use super::http::{Failure, Fetched};
@@ -14,13 +14,42 @@ pub fn server(raw: &Value, config: &Value, section: &str) -> Option<Server> {
     if config[section]["enabled"] == false {
         return None;
     }
-    let name = config[section]["server"].as_str().filter(|s| !s.is_empty())?;
+    named(raw, config[section]["server"].as_str().unwrap_or_default())
+}
+
+/// The `servers` entry of that name, once it is ready to call.
+fn named(raw: &Value, name: &str) -> Option<Server> {
+    if name.is_empty() {
+        return None;
+    }
     Server::from_entry(&raw["servers"][name]).filter(Server::is_ready)
 }
 
-/// Whether the hub carries out a request of this type itself, through the server of the section it touches.
-pub fn serves(raw: &Value, config: &Value, kind: &str) -> bool {
-    server(raw, config, super::requests::section_of(kind)).is_some()
+/// The server the hub calls for one mail account (see `mail::accounts`), once it is ready to call.
+pub fn mail_server(raw: &Value, config: &Value, account: &Value) -> Option<Server> {
+    if config["mail"]["enabled"] == false {
+        return None;
+    }
+    named(raw, account["server"].as_str().unwrap_or_default())
+}
+
+/// The mail account a request or message names, as the config file lists it, with the server the hub reaches it by.
+pub fn mail_account(raw: &Value, config: &Value, account: &str) -> Option<(Server, Value)> {
+    let account = mail::account(&raw["mail"], account)?;
+    Some((mail_server(raw, config, &account)?, account))
+}
+
+/// The server that carries a request out: its section's, or for mail that of the account the request names.
+pub fn server_for(raw: &Value, config: &Value, request: &Value) -> Option<Server> {
+    match super::requests::section_of(request["type"].as_str().unwrap_or_default()) {
+        "mail" => mail_account(raw, config, request["account"].as_str().unwrap_or_default()).map(|(server, _)| server),
+        section => server(raw, config, section),
+    }
+}
+
+/// Whether the hub carries out a request itself, through the server of the section (or mail account) it touches.
+pub fn serves(raw: &Value, config: &Value, request: &Value) -> bool {
+    server_for(raw, config, request).is_some()
 }
 
 /// The server the hub reads the monitor's numbers from, and its section (see `observability::server`).
@@ -183,5 +212,21 @@ mod tests {
         assert!(matches!(server(&raw, &config, "tickets"), Some(Server::Command { argv, .. }) if argv == ["linear-mcp", "--stdio"]));
         assert!(server(&raw, &config, "ci").is_none(), "a section that is off");
         assert!(server(&json!({}), &config, "tickets").is_none(), "no servers block");
+    }
+
+    #[test]
+    fn a_mail_request_is_served_by_its_accounts_server() {
+        let raw = json!({
+            "mail": {"enabled": true, "server": "claude.ai Gmail", "accounts": [{"id": "work", "server": "imap-work"}, {"id": "home", "server": "claude.ai Gmail"}]},
+            "servers": {"imap-work": {"command": "imap-mcp"}}
+        });
+        let config = json!({"mail": {"enabled": true}});
+        assert!(serves(&raw, &config, &json!({"type": "mail-archive", "account": "work"})));
+        assert!(!serves(&raw, &config, &json!({"type": "mail-archive", "account": "home"})), "a session's connector serves it");
+        assert!(!serves(&raw, &config, &json!({"type": "mail-archive"})), "no default account once accounts are listed");
+        assert!(!serves(&raw, &json!({"mail": {"enabled": false}}), &json!({"type": "mail-read", "account": "work"})), "mail is off");
+        let single = json!({"mail": {"enabled": true, "server": "imap"}, "servers": {"imap": {"command": "imap-mcp"}}});
+        assert!(serves(&single, &config, &json!({"type": "mail-get"})), "the section itself is the default account");
+        assert_eq!(mail_account(&single, &config, "").map(|(_, a)| a["id"].clone()), Some(json!("default")));
     }
 }

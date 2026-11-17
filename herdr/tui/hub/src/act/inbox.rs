@@ -432,7 +432,7 @@ pub fn talk_over(ctx: &mut Ctx, ticket: &Value, prs: &[Value], data: &Value, own
 /// entry the app follows to its outcome; with neither, it is refused at once.
 pub(super) fn request(ctx: &mut Ctx, payload: Value, row: &str, working: &str) -> Res {
     let raw = files::load(&files::config_dir().join("config.json")).unwrap_or(Value::Null);
-    let hubs = crate::feed::mcp::serves(&raw, &ctx.cfg.0, &s(&payload, "type")?);
+    let hubs = crate::feed::mcp::serves(&raw, &ctx.cfg.0, &payload);
     if !hubs && !agent::get("claude").is_some_and(|a| a.installed()) {
         return Err(format!("{} needs a server cockpit reaches itself (cockpit setup) or Claude Code's connectors", s(&payload, "label")?));
     }

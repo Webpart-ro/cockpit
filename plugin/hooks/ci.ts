@@ -498,10 +498,10 @@ export async function processRequests($: $, onDone: () => void) {
         await result('done', `extended by ${request.days} days`)
         await notify($, '🧪 Preview', `${request.preview} extended by ${request.days} days and redeploying`, await previewAction($, request.preview))
       } else if (request.type === 'mail-archive' || request.type === 'mail-read') {
-        await mailRequest($, request.type, request.message)
+        await mailRequest($, request.type, request.message, (request as { account?: string }).account)
         await result('done', request.type === 'mail-archive' ? 'archived' : 'marked read')
       } else if (request.type === 'mail-get') {
-        await mailGet($, request.message)
+        await mailGet($, request.message, (request as { account?: string }).account)
         await result('done', 'read')
         continue
       } else {

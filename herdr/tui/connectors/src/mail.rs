@@ -41,6 +41,63 @@ pub fn mapping(section: &Value) -> Value {
     merged
 }
 
+/// The account a mail section implies when it lists none: the section itself, under this id.
+pub const DEFAULT_ACCOUNT: &str = "default";
+
+/// The mailboxes a mail section reads, each `{id, name, server, tools, fields, urlTemplate}`: its `accounts` when it
+/// lists any, else the section itself as the one account `default`.
+pub fn accounts(section: &Value) -> Vec<Value> {
+    let listed: Vec<Value> = section["accounts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|a| a["id"].as_str().is_some_and(|id| !id.is_empty()) && a["enabled"] != false)
+        .map(|a| {
+            let id = a["id"].as_str().unwrap_or_default();
+            let mut account =
+                json!({"id": id, "name": a["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(id), "server": a["server"].as_str().unwrap_or_default()});
+            for key in ["tools", "fields", "urlTemplate"] {
+                if !a[key].is_null() {
+                    account[key] = a[key].clone();
+                }
+            }
+            account
+        })
+        .collect();
+    if !listed.is_empty() {
+        return listed;
+    }
+    let mut account = section.as_object().cloned().unwrap_or_default();
+    account.remove("accounts");
+    account.insert("id".into(), DEFAULT_ACCOUNT.into());
+    if account.get("name").and_then(Value::as_str).is_none_or(str::is_empty) {
+        account.insert("name".into(), "Mail".into());
+    }
+    vec![Value::Object(account)]
+}
+
+/// The account of that id in a mail section, `default` taken for an empty one.
+pub fn account(section: &Value, id: &str) -> Option<Value> {
+    let id = if id.is_empty() { DEFAULT_ACCOUNT } else { id };
+    accounts(section).into_iter().find(|a| a["id"] == id)
+}
+
+/// The account a listed message belongs to: its `account`, else the implied one.
+pub fn account_of(message: &Value) -> &str {
+    message["account"].as_str().filter(|a| !a.is_empty()).unwrap_or(DEFAULT_ACCOUNT)
+}
+
+/// A message's key across accounts, as ids may clash between mailboxes: its id in the implied account, else
+/// `<account>:<id>`.
+pub fn key(account: &str, id: &str) -> String {
+    if account.is_empty() || account == DEFAULT_ACCOUNT { id.to_string() } else { format!("{account}:{id}") }
+}
+
+/// A listed message's key (see `key`).
+pub fn key_of(message: &Value) -> String {
+    key(account_of(message), message["id"].as_str().unwrap_or_default())
+}
+
 /// My unread or important messages, newest first, at most thirty, as `{id, threadId, from, fromName, subject, snippet,
 /// url, date, unread}`.
 pub async fn inbox(tools: &impl Tools, mapping: &Value) -> Result<Vec<Value>, String> {
@@ -316,6 +373,44 @@ mod tests {
         assert_eq!(row_text(&json!({"messages": []})).unwrap(), "\u{f42f}  inbox zero");
         assert_eq!(row_text(&Value::Null), None);
         assert_eq!(cache_name("../a/b:c"), "_a_b_c");
+    }
+
+    #[test]
+    fn a_section_without_accounts_is_the_one_default_account() {
+        let section = json!({"enabled": true, "name": "Gmail", "server": "claude.ai Gmail", "tools": {"listInbox": {"tool": "search_threads"}}});
+        let only = accounts(&section);
+        assert_eq!(only.len(), 1);
+        assert_eq!((&only[0]["id"], &only[0]["name"], &only[0]["server"]), (&json!("default"), &json!("Gmail"), &json!("claude.ai Gmail")));
+        assert_eq!(only[0]["tools"]["listInbox"]["tool"], "search_threads");
+        assert_eq!(account(&section, "").unwrap()["id"], "default");
+        assert_eq!(accounts(&json!({}))[0]["name"], "Mail");
+    }
+
+    #[test]
+    fn listed_accounts_each_carry_their_own_mapping() {
+        let section = json!({"enabled": true, "name": "Mail", "server": "claude.ai Gmail", "accounts": [
+            {"id": "work", "name": "Acme", "server": "imap-acme", "tools": {"listInbox": {"tool": "list_inbox"}}, "urlTemplate": "https://mail.acme.example/{id}"},
+            {"id": "home", "server": "imap-home"},
+            {"id": "off", "server": "imap-off", "enabled": false},
+            {"name": "no id"}
+        ]});
+        let listed = accounts(&section);
+        let ids: Vec<&str> = listed.iter().map(|a| a["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["work", "home"]);
+        assert_eq!((&listed[0]["name"], &listed[0]["tools"]["listInbox"]["tool"]), (&json!("Acme"), &json!("list_inbox")));
+        assert_eq!((&listed[1]["name"], &listed[1]["tools"]), (&json!("home"), &Value::Null), "a name defaults to the id, a mapping is not inherited");
+        assert_eq!(mapping(&listed[0])["urlTemplate"], "https://mail.acme.example/{id}");
+        assert!(account(&section, "default").is_none());
+    }
+
+    #[test]
+    fn a_message_key_tells_accounts_apart() {
+        assert_eq!(key("default", "m1"), "m1");
+        assert_eq!(key("", "m1"), "m1");
+        assert_eq!(key("work", "INBOX:7:42"), "work:INBOX:7:42");
+        assert_eq!(key_of(&json!({"id": "m1", "account": "home"})), "home:m1");
+        assert_eq!((key_of(&json!({"id": "m1"})), account_of(&json!({"id": "m1"}))), ("m1".to_string(), "default"));
+        assert_eq!(cache_name(&key("work", "INBOX:7:42")), "work_INBOX_7_42");
     }
 
     #[test]

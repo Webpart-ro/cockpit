@@ -72,7 +72,9 @@ impl Source {
             // GitHub comes through gh, so the block being on is the whole of it; CI falls back to GitHub's checks.
             Source::Github | Source::Ci => block["enabled"] == Value::Bool(true),
             Source::Calendar => has("server") || has("ics"),
-            Source::Tickets | Source::Mail | Source::Platform => has("server"),
+            // Mail reaches its accounts' servers when it lists accounts.
+            Source::Mail => has("server") || block["accounts"].as_array().into_iter().flatten().any(|a| a["server"].as_str().is_some_and(|s| !s.is_empty())),
+            Source::Tickets | Source::Platform => has("server"),
         }
     }
 
@@ -116,6 +118,7 @@ mod tests {
         assert!(Source::Ci.connected_in(&config), "no server means GitHub's own checks");
         assert!(Source::Calendar.connected_in(&config), "the secret address is enough");
         assert!(!Source::Mail.connected_in(&config), "on, but reaching nothing");
+        assert!(Source::Mail.connected_in(&json!({"mail": {"enabled": true, "accounts": [{"id": "work", "server": "imap-work"}]}})), "through its accounts");
         assert!(!Source::Platform.connected_in(&config), "off, whatever its server");
     }
 

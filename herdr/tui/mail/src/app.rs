@@ -274,7 +274,7 @@ impl App {
     pub fn acts(&self) -> Vec<(Act, Cmd)> {
         let Some(m) = self.selected_message() else { return Vec::new() };
         let id = m.id.clone();
-        let maps = |verb: &str| self.config["mail"]["tools"][verb]["tool"].as_str().is_some_and(|t| !t.is_empty());
+        let maps = |verb: &str| crate::gui::maps(&self.config, &m.account, verb);
         let mut acts = Vec::new();
         if !matches!(self.thread, Thread::Ready(_)) {
             acts.push((Act::new("read", '⏎', "see").main(), Cmd::See(id.clone())));

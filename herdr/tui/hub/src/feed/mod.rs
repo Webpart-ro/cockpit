@@ -285,9 +285,14 @@ impl Feed {
         if self.mail.is_due(now, is_asked)
             && let Some(fetched) = mail::fetch(&plan.raw, &plan.config.0)
         {
-            let error = self.mail.after(&fetched.as_ref().map(|_| ()).map_err(|e| Failure::Other(e.clone())), now);
-            let fetched = fetched.map_err(|_| format!("Mail: {}", error.unwrap_or_default()));
-            let (before, after) = crate::store::global().update("mail", |doc| mail::merge(doc, fetched, now_ms()));
+            // The round backs off only when every account failed; one account's failure shows on its own.
+            let alone = fetched.len() == 1;
+            let failed = fetched.iter().all(|(_, f)| f.is_err()).then(|| fetched.iter().find_map(|(_, f)| f.as_ref().err().cloned())).flatten();
+            let error = self.mail.after(&failed.map_or(Ok(()), |e| Err(Failure::Other(e))), now);
+            let fetched: Vec<mail::Fetched> =
+                fetched.into_iter().map(|(account, f)| (account, f.map_err(|e| format!("Mail: {}", error.clone().filter(|_| alone).unwrap_or(e))))).collect();
+            let configured = cockpit_connectors::mail::accounts(&plan.raw["mail"]);
+            let (before, after) = crate::store::global().update("mail", |doc| mail::merge(doc, fetched, &configured, now_ms()));
             for (title, body, action) in mail::news(&before, &after) {
                 news::notify(&plan.config, &title, &body, &action, &[]);
             }

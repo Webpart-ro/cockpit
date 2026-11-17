@@ -67,8 +67,7 @@ pub fn take(cache: &Path, config: &Config, raw: &Value) {
         let path = entry.path();
         let Some(request) = cockpit_core::files::load(&path) else { continue };
         let kind = request["type"].as_str().unwrap_or_default();
-        let section = section_of(kind);
-        let Some(server) = mcp::server(raw, &config.0, section) else { continue };
+        let Some(server) = mcp::server_for(raw, &config.0, &request) else { continue };
         // A rename is atomic: whoever moves the file carries it out.
         let claimed = dir.join(format!("claimed-{name}"));
         if std::fs::rename(&path, &claimed).is_err() {
@@ -108,6 +107,12 @@ pub fn take(cache: &Path, config: &Config, raw: &Value) {
             }
         }
     }
+}
+
+/// The mapping of the mail account a request names.
+fn mail_mapping(raw: &Value, request: &Value) -> Value {
+    let account = cockpit_connectors::mail::account(&raw["mail"], request["account"].as_str().unwrap_or_default());
+    cockpit_connectors::mail::mapping(&account.unwrap_or(Value::Null))
 }
 
 /// One request through the server: the outcome's message, and the notification's title (none when empty), body and
@@ -168,8 +173,8 @@ fn carry_out(server: &Server, config: &Config, raw: &Value, request: &Value) -> 
             Ok((format!("extended by {days} days"), "🧪 Preview".into(), format!("{preview} extended by {days} days and redeploying"), dashboard(&preview)))
         }
         kind @ ("mail-archive" | "mail-read") => {
-            let mapping = cockpit_connectors::mail::mapping(section);
-            let message = serde_json::json!({"id": s("message")});
+            let mapping = mail_mapping(raw, request);
+            let message = super::mail::listed(&s("account"), &s("message"));
             if kind == "mail-archive" {
                 mcp::with(server, async |c| cockpit_connectors::mail::archive(&Mapped { connection: c, section: &mapping }, &message).await)?;
             } else {
@@ -178,12 +183,11 @@ fn carry_out(server: &Server, config: &Config, raw: &Value, request: &Value) -> 
             Ok(("done".into(), "✉️ Mail".into(), format!("{} {}", if kind == "mail-archive" { "Archived" } else { "Read" }, s("label")), "space:mail".into()))
         }
         "mail-get" => {
-            let mapping = cockpit_connectors::mail::mapping(section);
-            let id = s("message");
-            let message = super::mail::listed(&id);
+            let mapping = mail_mapping(raw, request);
+            let message = super::mail::listed(&s("account"), &s("message"));
             let read = mcp::with(server, async |c| cockpit_connectors::mail::thread(&Mapped { connection: c, section: &mapping }, &mapping, &message).await);
             let failed = read.as_ref().err().cloned();
-            super::mail::keep_thread(&id, read);
+            super::mail::keep_thread(&cockpit_connectors::mail::key_of(&message), read);
             match failed {
                 Some(error) => Err(error),
                 None => Ok(("read".into(), String::new(), String::new(), String::new())),
