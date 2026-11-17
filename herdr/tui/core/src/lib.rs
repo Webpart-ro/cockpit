@@ -17,6 +17,7 @@ pub mod input;
 pub mod keys;
 pub mod notify;
 pub mod palette;
+pub mod platform;
 pub mod resume;
 pub mod routines;
 pub mod seen;

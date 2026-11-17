@@ -2,6 +2,7 @@
 //! spaces are moved to match.
 
 use cockpit_core::files;
+use cockpit_core::platform;
 use serde_json::Value;
 
 use super::{Ctx, arg};
@@ -24,7 +25,10 @@ pub fn pin_order(ctx: &mut Ctx, args: &[Value]) -> Res {
     config["spaces"] = Value::Array(reordered(&spaces, &order));
     write_private(&path, &config).map_err(|e| format!("config.json not written: {e}"))?;
     let script = crate::config::script("pin-spaces.sh");
-    let _ = std::process::Command::new("sh").arg(script).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+    let _ = platform::args(&mut std::process::Command::new(platform::shell()), [script])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
     ctx.note("pinned spaces reordered".to_string());
     Ok(())
 }
@@ -32,9 +36,8 @@ pub fn pin_order(ctx: &mut Ctx, args: &[Value]) -> Res {
 /// The config written through a file only its owner reads, as it holds tokens.
 fn write_private(path: &std::path::Path, value: &Value) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let tmp = path.with_file_name(".config.json.tmp");
-    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+    let mut file = platform::private_file(std::fs::OpenOptions::new().write(true).create(true).truncate(true)).open(&tmp)?;
     file.write_all(format!("{}\n", serde_json::to_string_pretty(value).unwrap_or_default()).as_bytes())?;
     std::fs::rename(&tmp, path)
 }

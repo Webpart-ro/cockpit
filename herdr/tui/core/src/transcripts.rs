@@ -1072,7 +1072,7 @@ mod tests {
     }
 
     fn write(dir: &Path, rel: &str, lines: &[Value]) -> PathBuf {
-        let path = dir.join(rel);
+        let path = rel.split('/').fold(dir.to_path_buf(), |path, part| path.join(part));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, lines.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")).unwrap();
         path
@@ -1189,7 +1189,7 @@ mod tests {
     #[test]
     fn transcripts_are_found_by_id_and_by_the_folder_a_terminal_works_in() {
         let dir = tempfile::tempdir().unwrap();
-        let work = dir.path().join("work/api");
+        let work = dir.path().join("work").join("api");
         std::fs::create_dir_all(&work).unwrap();
         let cwd = work.to_string_lossy().into_owned();
         let codex = dir.path().join("codex");
@@ -1226,7 +1226,10 @@ mod tests {
         std::fs::create_dir_all(&work).unwrap();
         let cwd = work.to_string_lossy().into_owned();
         let pi_home = dir.path().join("pi");
-        let pi = pi_home.join(format!("sessions/--{}--/2026-11-03T10-00-00-000Z_p-1.jsonl", cwd.trim_start_matches('/').replace('/', "-")));
+        let folder = cwd.trim_start_matches('/').replace('/', "-");
+        #[cfg(windows)]
+        let folder = folder.replace(['\\', ':'], "-");
+        let pi = pi_home.join("sessions").join(format!("--{folder}--")).join("2026-11-03T10-00-00-000Z_p-1.jsonl");
         std::fs::create_dir_all(pi.parent().unwrap()).unwrap();
         let spent = json!({"input": 10, "output": 5, "cacheRead": 9000, "cacheWrite": 0, "totalTokens": 9015, "cost": {"total": 0.004}});
         std::fs::write(&pi, lines(&[
@@ -1237,7 +1240,7 @@ mod tests {
             json!({"type": "session_info", "id": "a3", "timestamp": "2026-11-03T10:00:10.000Z", "name": "Quota rename"}),
         ])).unwrap();
         let qwen_home = dir.path().join("qwen");
-        let qwen = qwen_home.join("projects/-r-api/chats/q-1.jsonl");
+        let qwen = qwen_home.join("projects").join("-r-api").join("chats").join("q-1.jsonl");
         std::fs::create_dir_all(qwen.parent().unwrap()).unwrap();
         std::fs::write(&qwen, lines(&[
             json!({"uuid": "u1", "sessionId": "q-1", "timestamp": "2026-11-03T10:00:00Z", "type": "user", "cwd": cwd, "gitBranch": "me/eng-412-quotas", "message": {"role": "user", "parts": [{"text": "Add tests for the limiter"}]}}),
@@ -1246,7 +1249,7 @@ mod tests {
             json!({"uuid": "u3", "sessionId": "q-1", "timestamp": "2026-11-03T10:00:08Z", "type": "system", "subtype": "custom_title", "cwd": cwd, "systemPayload": {"customTitle": "Limiter tests"}}),
         ])).unwrap();
         let copilot_home = dir.path().join("copilot");
-        let copilot = copilot_home.join("session-state/5c1e0000-0000-4000-8000-000000000412/events.jsonl");
+        let copilot = copilot_home.join("session-state").join("5c1e0000-0000-4000-8000-000000000412").join("events.jsonl");
         std::fs::create_dir_all(copilot.parent().unwrap()).unwrap();
         std::fs::write(&copilot, lines(&[
             json!({"id": "e1", "timestamp": "2026-11-03T10:00:00.000Z", "type": "session.start", "data": {"sessionId": "5c1e0000-0000-4000-8000-000000000412", "selectedModel": "acme-mini", "context": {"cwd": cwd, "branch": "main"}}}),

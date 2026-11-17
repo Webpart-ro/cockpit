@@ -92,7 +92,8 @@ pub fn detect() -> Frontend {
     let terminal = std::env::var("HC_TERMINAL_ID").ok().filter(|v| !v.is_empty());
     if std::env::var("HERDR_ENV").is_ok_and(|v| v == "1") {
         static UNDER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let under = *UNDER.get_or_init(|| terminal.is_some_and(|t| descends_from_terminal(&t)));
+        // with no herdr TUI there, herdr's variables only ever come from the app.
+        let under = cfg!(windows) || *UNDER.get_or_init(|| terminal.is_some_and(|t| descends_from_terminal(&t)));
         return if under { Frontend::App } else { Frontend::Tui };
     }
     if terminal.is_some() {
@@ -101,7 +102,8 @@ pub fn detect() -> Frontend {
     if let Some(found) = files::config()["frontend"].as_str().and_then(Frontend::parse) {
         return found;
     }
-    if app_home().join("herdr-app.sock").exists() && !tui_running() { Frontend::App } else { Frontend::Tui }
+    // the app has no socket file there; with no herdr TUI port it is the only frontend.
+    if (cfg!(windows) || app_home().join("herdr-app.sock").exists()) && !tui_running() { Frontend::App } else { Frontend::Tui }
 }
 
 /// Whether this process runs under the app terminal's shell. herdr's variables leak into app terminals when
@@ -114,6 +116,7 @@ fn descends_from_terminal(terminal: &str) -> bool {
         if pid == shell {
             return true;
         }
+        // not reached on Windows: detect() skips the walk, there being no herdr TUI.
         let out = Command::new("ps").args(["-o", "ppid=", "-p", &pid.to_string()]).stderr(Stdio::null()).output();
         match out.ok().and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok()) {
             Some(parent) if parent > 1 => pid = parent,
@@ -124,7 +127,8 @@ fn descends_from_terminal(terminal: &str) -> bool {
 }
 
 fn tui_running() -> bool {
-    Command::new("pgrep").args(["-x", "herdr"]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+    // there is no herdr TUI to find (pgrep has no Windows form).
+    cfg!(not(windows)) && Command::new("pgrep").args(["-x", "herdr"]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
 /// The Herdr app's home: HERDR_APP_HOME, else ~/.config/herdr-app.

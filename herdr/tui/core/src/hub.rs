@@ -17,12 +17,17 @@
 //!   documents over the last week, each with the app and row key it touched.
 //! - `ping`: {ok: true}.
 
+use crate::platform;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
+#[cfg(windows)]
+use windows::Connection as UnixStream;
 
 use serde_json::{Value, json};
 
@@ -43,9 +48,10 @@ pub fn socket() -> PathBuf {
 
 /// The `cockpit` binary beside the app's own (the app itself, outside tests), which serves as the hub with `hub`.
 fn binary() -> PathBuf {
-    std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join("cockpit"))).unwrap_or_else(|| "cockpit".into())
+    std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join(platform::exe_name("cockpit")))).unwrap_or_else(|| "cockpit".into())
 }
 
+#[cfg(unix)]
 fn connect(timeout: Duration) -> Option<UnixStream> {
     if let Ok(stream) = UnixStream::connect(socket()) {
         return Some(stream);
@@ -83,18 +89,112 @@ fn connect(timeout: Duration) -> Option<UnixStream> {
     None
 }
 
+#[cfg(windows)]
+fn connect(timeout: Duration) -> Option<UnixStream> {
+    if let Some(stream) = windows::connect(timeout) {
+        return Some(stream);
+    }
+    static STARTED: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    {
+        let mut started = STARTED.lock().ok()?;
+        if started.is_some_and(|at| at.elapsed() < Duration::from_secs(5)) {
+            return None;
+        }
+        *started = Some(Instant::now());
+    }
+    let cache = files::cache();
+    std::fs::create_dir_all(&cache).ok()?;
+    let log = cache.join("hub.log");
+    if std::fs::metadata(&log).is_ok_and(|m| m.len() > 256 * 1024) {
+        let _ = std::fs::remove_file(&log);
+    }
+    let errors = std::fs::OpenOptions::new().create(true).append(true).open(&log).ok();
+    let _ = platform::detach(
+        std::process::Command::new(binary())
+            .arg("hub")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(errors.map_or_else(std::process::Stdio::null, std::process::Stdio::from)),
+    )
+    .spawn();
+    let start = Instant::now();
+    while start.elapsed() < timeout.min(Duration::from_secs(2)) {
+        std::thread::sleep(Duration::from_millis(25));
+        if let Some(stream) = windows::connect(timeout.saturating_sub(start.elapsed())) {
+            return Some(stream);
+        }
+    }
+    None
+}
+
 /// One request and its answer; an error when the hub cannot be reached or answers with `error`.
 pub fn request(req: &Value, timeout: Duration) -> Result<Value, String> {
-    let mut stream = connect(timeout).ok_or("the cockpit hub did not start; what it said is in ~/.cache/cockpit/hub.log")?;
+    let stream = connect(timeout).ok_or("the cockpit hub did not start; what it said is in ~/.cache/cockpit/hub.log")?;
+    exchange(stream, req, timeout)
+}
+
+/// Sends to an existing Windows hub without starting one.
+#[cfg(windows)]
+pub fn request_if_running(req: &Value, timeout: Duration) -> Result<Value, String> {
+    exchange(windows::connect(timeout).ok_or("the cockpit hub is not running")?, req, timeout)
+}
+
+fn exchange(mut stream: UnixStream, req: &Value, timeout: Duration) -> Result<Value, String> {
     stream.set_read_timeout(Some(timeout)).ok();
     stream.set_write_timeout(Some(timeout)).ok();
-    writeln!(stream, "{req}").map_err(|e| e.to_string())?;
+    write_request(&mut stream, req).map_err(|e| e.to_string())?;
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line).map_err(|e| e.to_string())?;
     let answer: Value = serde_json::from_str(&line).map_err(|_| "the cockpit hub sent no answer".to_string())?;
     match answer.get("error").and_then(Value::as_str) {
         Some(error) if answer.get("note").is_none() => Err(error.to_string()),
         _ => Ok(answer),
+    }
+}
+
+#[cfg(unix)]
+fn write_request(stream: &mut UnixStream, req: &Value) -> std::io::Result<()> {
+    writeln!(stream, "{req}")
+}
+
+#[cfg(windows)]
+fn write_request(stream: &mut UnixStream, req: &Value) -> std::io::Result<()> {
+    let mut req = req.clone();
+    req["token"] = Value::String(stream.token.clone());
+    writeln!(stream.stream, "{req}")
+}
+
+#[cfg(windows)]
+mod windows {
+    use super::*;
+    use std::io::Read;
+    use std::net::{IpAddr, SocketAddr, TcpStream};
+
+    pub struct Connection {
+        pub stream: TcpStream,
+        pub token: String,
+    }
+
+    impl std::ops::Deref for Connection {
+        type Target = TcpStream;
+        fn deref(&self) -> &TcpStream {
+            &self.stream
+        }
+    }
+
+    impl Read for Connection {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.stream.read(buffer)
+        }
+    }
+
+    pub fn connect(timeout: Duration) -> Option<Connection> {
+        let info = files::load(&files::cache().join("hub.json"))?;
+        let port = u16::try_from(info["local_port"].as_u64()?).ok()?;
+        let token = info["token"].as_str()?.to_string();
+        let address = SocketAddr::new(IpAddr::from([127, 0, 0, 1]), port);
+        let stream = TcpStream::connect_timeout(&address, timeout.min(Duration::from_secs(2))).ok()?;
+        Some(Connection { stream, token })
     }
 }
 
@@ -193,7 +293,7 @@ pub fn subscribe(names: &[&str]) -> Docs {
     std::thread::spawn(move || {
         loop {
             if let Some(mut stream) = connect(Duration::from_secs(3))
-                && writeln!(stream, "{request}").is_ok()
+                && write_request(&mut stream, &request).is_ok()
             {
                 for line in BufReader::new(stream).lines() {
                     let Ok(line) = line else { break };

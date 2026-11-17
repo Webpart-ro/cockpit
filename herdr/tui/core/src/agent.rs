@@ -2,6 +2,7 @@
 //! templates the config's `agents.commands` overrides. A template argument whose `{prompt}`, `{session}` or `{model}`
 //! has no value is dropped whole, so `start(None)` opens the agent at its prompt and `"-i {prompt}"` goes as one.
 
+use crate::platform;
 use std::path::Path;
 
 use serde_json::Value;
@@ -538,8 +539,7 @@ pub fn model_in(value: &Value, agent: &Agent) -> Option<String> {
 }
 
 fn runs(p: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    p.is_file() && p.metadata().is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+    platform::executable(p)
 }
 
 impl Agent {
@@ -554,14 +554,17 @@ impl Agent {
             return self.bin.clone();
         }
         let home = files::home();
-        let mut first = vec![home.join(".local/bin").join(&self.bin)];
+        let mut first = vec![home.join(".local/bin").join(platform::exe_name(&self.bin))];
         let mut last: Vec<std::path::PathBuf> = vec![];
         match self.id.as_str() {
-            "claude" => first.insert(0, home.join(".claude/local/claude")),
+            "claude" => first.insert(0, home.join(".claude/local").join(platform::exe_name("claude"))),
             "codex" => last.push("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex".into()),
             _ => {}
         }
+        #[cfg(unix)]
         let on_path = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).map(|d| d.join(&self.bin)).collect::<Vec<_>>()).unwrap_or_default();
+        #[cfg(windows)]
+        let on_path = platform::which(&self.bin);
         first.into_iter().chain(on_path).chain(last).find(|p| runs(p)).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| self.bin.clone())
     }
 
@@ -572,7 +575,10 @@ impl Agent {
     /// What to type for it in a shell: its bare name when that is what PATH finds, else its full path.
     pub fn command(&self) -> String {
         let path = self.path();
+        #[cfg(unix)]
         let on_path = std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(&self.bin)).find(|p| runs(p)));
+        #[cfg(windows)]
+        let on_path = platform::which(&self.bin);
         if on_path.is_some_and(|p| p.to_string_lossy() == path) { self.bin.clone() } else { path }
     }
 

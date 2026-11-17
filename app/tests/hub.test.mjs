@@ -134,7 +134,8 @@ test("links and navigation stay on the desktop", async t => {
   await f.hub.act("inbox", "open_url", ["https://github.com/acme/api/pull/4"]);
   await f.hub.go({ app: "inbox", key: "https://github.com/acme/api/pull/4" });
   const command = f.calls.find(call => call[0] === "exec");
-  assert.equal(command[1], "cmd");
+  assert.equal(command[1], "rundll32");
+  assert.equal(command[2].join(" "), "url.dll,FileProtocolHandler https://github.com/acme/api/pull/4");
   assert.equal(command[3]?.on, undefined);
   assert.deepEqual(f.calls.find(call => call[0] === "run"), ["run", "cockpit.go:inbox"]);
   assert.equal(f.messages.length, 0);

@@ -35,10 +35,10 @@ export async function openInEditor(folder, machine = null) {
   const name = await editor();
   if (machine) {
     const uri = `vscode-remote://ssh-remote+${await hostOf(machine)}${folder}`;
-    const r = await exec(name, ["--folder-uri", uri]).catch(() => null);
+    const r = await hub.execCommand(name, ["--folder-uri", uri]).catch(() => null);
     return r?.code === 0 ? null : `${name} could not open ${machine}:${folder}`;
   }
-  const r = await exec(name, [folder]).catch(() => null);
+  const r = await hub.execCommand(name, [folder]).catch(() => null);
   if (r?.code === 0) return null;
   const app = APPS[name] ?? name;
   // An editor whose command isn't on the PATH still opens by its app name on macOS.

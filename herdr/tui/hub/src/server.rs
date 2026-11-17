@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,6 +22,7 @@ pub trait Conn: Read + Write + Send + Sized + 'static {
     fn dup(&self) -> std::io::Result<Self>;
 }
 
+#[cfg(unix)]
 impl Conn for UnixStream {
     fn dup(&self) -> std::io::Result<Self> {
         self.try_clone()

@@ -1,12 +1,12 @@
 import type { EngineInterface } from 'claude-code'
 
-import { home } from './config'
+import { cockpitCommand } from './config'
 import { MCP } from './tools'
 
 type $ = EngineInterface
 
 // Two tools over the hub: the palette's search across cockpit, and what changed in its shared data. Each runs the
-// `cockpit` CLI through cockpit.sh and hands back its JSON as is.
+// `cockpit` CLI through cockpitCommand and hands back its JSON as is.
 const SEARCH = MCP.tools.cockpit_search
 const CHANGES = MCP.tools.cockpit_changes
 const READ = MCP.tools.cockpit_read
@@ -71,8 +71,9 @@ export function changesArgs(input: Record<string, unknown>): string[] | string {
 export async function find($: $, input: Record<string, unknown>, argsOf: (input: Record<string, unknown>) => string[] | string) {
   const args = argsOf(input)
   if (typeof args === 'string') return { deny: args }
-  const command = `${await home($)}/.config/cockpit/herdr/cockpit.sh`
-  const { exitCode, stdout, stderr } = await $.process.run(['sh', command, ...args], { timeoutMs: 60_000 })
+  const command = await cockpitCommand($)
+  if (!command) return { deny: `cockpit ${args[0]}: no cockpit binary; run /cockpit:doctor` }
+  const { exitCode, stdout, stderr } = await $.process.run([...command, ...args], { timeoutMs: 60_000 })
   // cockpit.sh says nothing when the plugin has no binary yet: /cockpit:doctor tells why.
   if (exitCode !== 0 || stdout.trim() === '') return { deny: stderr.trim() || `cockpit ${args[0]}: no cockpit binary; run /cockpit:doctor` }
   return { result: stdout.trim() }

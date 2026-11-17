@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! `cockpit mcp` spoken to over stdio, and `cockpit agents connect` on a fake HOME.
 
 mod common;

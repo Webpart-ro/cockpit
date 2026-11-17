@@ -273,6 +273,8 @@ async function openAppPane($: $, here: Here, name: string, placement: Placement)
   if (!pane) return 'herdr-app pane.split failed: is the cockpit mod installed? (cockpit app install)'
   await $.fs.write(`${await showDir($)}/${name}.app`, JSON.stringify({ pane, terminal: here.terminal }))
   shownSeen = undefined
+  // The view learns its pane here, so hiding it never closes another.
+  await appDo($, `cockpit.show:pane:${name}:${pane}`)
   if (placement === 'zoomed') await appDo($, 'pane.zoom', { pane })
   // The keyboard stays with the conversation.
   else await appDo($, 'pane.focus', { terminal: here.terminal })

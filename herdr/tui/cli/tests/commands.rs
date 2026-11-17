@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! Each subcommand against fake herdr, terminal-browser and hub: the calls it makes, what it prints and its exit code.
 
 mod common;

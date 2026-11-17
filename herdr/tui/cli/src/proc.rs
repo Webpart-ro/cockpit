@@ -1,6 +1,7 @@
 //! Child processes run to their end with a timeout, the PATH the plugin's tools live on, shell quoting, and JSON printed
 //! the way the scripts' readers have always parsed it.
 
+use cockpit_core::platform;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::channel;
 use std::time::Duration;
@@ -20,6 +21,7 @@ impl Out {
 }
 
 /// Homebrew's and the user's bin folders before the inherited PATH: herdr runs its plugins with a bare one.
+#[cfg(unix)]
 pub fn path() -> String {
     let home = cockpit_core::files::home();
     let local = home.join(".local/bin");
@@ -27,21 +29,29 @@ pub fn path() -> String {
     format!("/opt/homebrew/bin:/usr/local/bin:{}:{inherited}", local.display())
 }
 
+#[cfg(windows)]
+pub fn path() -> String {
+    std::env::var("PATH").unwrap_or_default()
+}
+
 /// The first executable of that name on `path()`.
 pub fn which(name: &str) -> Option<String> {
+    #[cfg(windows)]
+    {
+        platform::which(name).map(|p| p.to_string_lossy().into_owned())
+    }
+    #[cfg(unix)]
     path().split(':').filter(|d| !d.is_empty()).map(|d| std::path::Path::new(d).join(name)).find(|p| executable(p)).map(|p| p.to_string_lossy().into_owned())
 }
 
 pub fn executable(path: &std::path::Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    platform::executable(path)
 }
 
 /// Runs argv on `path()` with these extra variables; None when it cannot start or outlives the timeout.
 pub fn run(argv: &[&str], env: &[(&str, &str)], timeout: Duration) -> Option<Out> {
     let (program, args) = argv.split_first()?;
-    let child = Command::new(program)
-        .args(args)
+    let child = platform::command(program, args)
         .env("PATH", path())
         .envs(env.iter().copied())
         .stdin(Stdio::null())
@@ -62,8 +72,7 @@ pub fn run(argv: &[&str], env: &[(&str, &str)], timeout: Duration) -> Option<Out
         }),
         Ok(Err(_)) => None,
         Err(_) => {
-            // SAFETY: kill only sends a signal to the child this function started and still owns.
-            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            platform::kill(u64::from(pid));
             None
         }
     }

@@ -3,7 +3,7 @@ import type { EngineInterface } from 'claude-code'
 
 import type { Work } from '../types'
 
-import { home, loadConfig } from './config'
+import { home, isWindows, loadConfig } from './config'
 
 type $ = EngineInterface
 
@@ -56,11 +56,15 @@ async function follow($: $, path: string) {
   if (found && (found.dir !== current?.dir || found.repo !== current.repo)) await update($, work, () => found)
 }
 
+// Windows tool text in the form the checkouts are kept in: `\` as `/`, and an MSYS `/f/…` as `F:/…`.
+const forward = (text: string) => text.replaceAll('\\', '/').replace(/(^|[\s'"`=(;|&])\/([A-Za-z])\//g, (_, lead: string, drive: string) => `${lead}${drive.toUpperCase()}:/`)
+
 export async function trackWork($: $, args: Record<string, unknown>) {
-  const text = ['command', 'file_path', 'path', 'notebook_path']
+  const joined = ['command', 'file_path', 'path', 'notebook_path']
     .map(key => args[key])
     .filter((v): v is string => typeof v === 'string')
     .join(' ')
+  const text = (await isWindows($)) ? forward(joined) : joined
   const { reposDir, pattern, dir } = await roots($)
   const absolute = [...text.matchAll(new RegExp(`(?:${pattern})/[^\\s'"\`;|&()<>]+`, 'g'))].map(m => m[0].replace(/^~/, dir))
   const relative = [...text.matchAll(/(?:^|[;&|]\s*)cd\s+([A-Za-z0-9._-]+)(?=[\s;&|/]|$)/g)].map(m => `${reposDir}/${m[1]}`)

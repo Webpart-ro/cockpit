@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! The inbox's Claude-session actions through the socket, by what they ask herdr: a tab of the actions space or a space of
 //! their own, the PR's branch found in a worktree, a plan's tab moved out, and the ticket's busiest session forked.
 

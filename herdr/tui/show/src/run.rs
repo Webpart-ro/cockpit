@@ -28,6 +28,7 @@ pub fn run(name: &str) -> std::io::Result<()> {
     std::fs::write(&alive.0, std::process::id().to_string())?;
     // The pane closing (HUP) or the mod hiding the view (TERM) ends the app here: the pid file goes and the terminal
     // gets its screen and mouse back, which a bare exit in the signal handler would leave in the app's modes.
+    #[cfg(unix)]
     if let Ok(mut signals) = signal_hook::iterator::Signals::new([signal_hook::consts::SIGHUP, signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT]) {
         let pid = alive.0.clone();
         std::thread::spawn(move || {
@@ -37,6 +38,17 @@ pub fn run(name: &str) -> std::io::Result<()> {
                 ratatui::restore();
                 std::process::exit(0);
             }
+        });
+    }
+    // The console closing, or a break or interrupt, ends the app the same way.
+    #[cfg(windows)]
+    {
+        let pid = alive.0.clone();
+        cockpit_core::platform::on_console_shutdown(move || {
+            let _ = std::fs::remove_file(&pid);
+            let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+            ratatui::restore();
+            std::process::exit(0);
         });
     }
     warm_up();

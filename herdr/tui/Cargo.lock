@@ -501,6 +501,7 @@ version = "0.40.3"
 dependencies = [
  "chrono",
  "crossterm",
+ "libc",
  "notify",
  "nucleo-matcher",
  "ratatui",
@@ -510,6 +511,7 @@ dependencies = [
  "tachyonfx",
  "tempfile",
  "unicode-width",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

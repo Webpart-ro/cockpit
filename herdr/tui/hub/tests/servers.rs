@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! The hub's own MCP servers, played by a fake one over stdio: each source's mapping reads tickets, pull requests, CI
 //! runs, meetings, deploys and the monitor's numbers into the caches, and the apps' requests and ticket actions go out
 //! through the same servers, whatever the tool and whatever the agent.

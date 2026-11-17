@@ -1,6 +1,7 @@
 //! `cockpit doctor`: checks every part of cockpit and prints one line per check, ok, warn or fail, with what it found
 //! and the fix.
 
+use cockpit_core::platform;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -100,9 +101,19 @@ pub fn main(args: &[String]) {
 impl Doctor {
     fn new() -> Self {
         let home = files::home();
+        #[cfg(unix)]
         let path = format!("/opt/homebrew/bin:/usr/local/bin:{0}/.local/bin:{0}/.claude/local:{1}", home.display(), std::env::var("PATH").unwrap_or_default());
+        #[cfg(windows)]
+        let path = {
+            let inherited = std::env::var_os("PATH").unwrap_or_default();
+            let dirs = [home.join(".local/bin"), home.join(".claude/local")].into_iter().chain(std::env::split_paths(&inherited));
+            std::env::join_paths(dirs).unwrap_or(inherited).to_string_lossy().into_owned()
+        };
         let herdr_dir = files::herdr_dir();
         let root = herdr_dir.canonicalize().unwrap_or(herdr_dir);
+        // canonicalize gives Windows paths a `\\?\` prefix that no registry or command line uses.
+        #[cfg(windows)]
+        let root = root.to_string_lossy().strip_prefix("\\\\?\\").map_or(root.clone(), PathBuf::from);
         let link = files::config_dir().join("herdr");
         let plugins = load(&home.join(".config/herdr/plugins.json")).unwrap_or(Value::Null);
         let registered = values(&plugins).filter(|p| p["plugin_id"] == "cockpit").map(|p| raw(&p["plugin_root"])).collect::<Vec<_>>().join("\n");
@@ -114,7 +125,7 @@ impl Doctor {
             if std::fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()) {
                 let _ = std::fs::remove_file(&link);
             }
-            let _ = std::os::unix::fs::symlink(&root, &link);
+            let _ = platform::link_dir(&root, &link);
         }
         let config_path = files::config_dir().join("config.json");
         let resolved = files::cache().join("config.json");
@@ -163,12 +174,25 @@ impl Doctor {
         serde_json::from_str(&self.output(&argv)).unwrap_or(Value::Null)
     }
 
+    #[cfg(unix)]
     fn running(&self, pattern: &str) -> bool {
         self.succeeds(&["pgrep", "-f", pattern])
     }
 
+    /// Windows has no command lines to match (no pgrep, and none without WMI). The hub is the process hub.json names; the
+    /// space apps and their supervisors are the herdr TUI's, so nothing runs them there.
+    #[cfg(windows)]
+    fn running(&self, pattern: &str) -> bool {
+        pattern.ends_with("cockpit hub$") && !crate::gui::hubs().is_empty()
+    }
+
     /// The first executable of that name on the doctor's PATH.
     fn which(&self, name: &str) -> Option<PathBuf> {
+        #[cfg(windows)]
+        {
+            platform::which(name)
+        }
+        #[cfg(unix)]
         self.path.split(':').filter(|d| !d.is_empty()).map(|d| Path::new(d).join(name)).find(|p| proc::executable(p))
     }
 
@@ -209,16 +233,19 @@ impl Doctor {
         let root = self.root.display();
         let mut dir = self.root.join("bin");
         let dev = self.root.join("tui/target/release");
-        if !proc::executable(&dir.join("cockpit")) && proc::executable(&dev.join("cockpit")) {
+        if !proc::executable(&dir.join(platform::exe_name("cockpit"))) && proc::executable(&dev.join(platform::exe_name("cockpit"))) {
             dir = dev;
         }
         let toml = std::fs::read_to_string(self.root.join("herdr-plugin.toml")).unwrap_or_default();
         let want = toml.lines().filter_map(|l| l.strip_prefix("version = \"")?.strip_suffix('"')).collect::<Vec<_>>().join("\n");
         let have = std::fs::read_to_string(dir.join(".version")).unwrap_or_default().trim_end_matches('\n').to_string();
-        let binary = dir.join("cockpit");
+        let binary = dir.join(platform::exe_name("cockpit"));
         let runs = self.output(&[&binary.to_string_lossy(), "--version"]);
         if !proc::executable(&binary) {
+            #[cfg(unix)]
             fail(&format!("cockpit binary missing, the spaces stay empty → sh {root}/fetch-apps.sh, or cargo build --release in {root}/tui"));
+            #[cfg(windows)]
+            fail(&format!("cockpit binary missing, the spaces stay empty → cargo build --release in {root}/tui (no release is published for Windows yet)"));
         } else if dir == self.root.join("bin") && have != want {
             let have = if have.is_empty() { "an unknown version" } else { &have };
             warn(&format!("cockpit binary from {have}, the plugin is on {want}: the hub installs it once the release has it → sh {root}/fetch-apps.sh"));
@@ -228,13 +255,25 @@ impl Doctor {
             ok(&format!("cockpit binary in {} ({})", dir.display(), runs.strip_prefix("cockpit ").unwrap_or(&runs)));
         }
         // A hub left with a dead socket keeps every action and search waiting.
-        if self.running("cockpit (inbox|todo|runbook|meetings|monitor|routines) cockpit-space") {
+        // Windows pings with this binary: the hub answers the same to any, and the one in bin/ may be missing.
+        #[cfg(unix)]
+        let ping = binary.clone();
+        #[cfg(windows)]
+        let ping = std::env::current_exe().unwrap_or_else(|_| binary.clone());
+        let apps = self.running("cockpit (inbox|todo|runbook|meetings|monitor|routines) cockpit-space");
+        // The Herdr app starts the hub on its own, with no space apps: a hub that runs is checked on Windows all the same.
+        #[cfg(windows)]
+        let apps = apps || self.running("(^|/)cockpit hub$");
+        if apps {
             if !self.running("(^|/)cockpit hub$") {
                 ok("hub not started yet: the apps start it at their first action or search");
-            } else if self.succeeds(&[&binary.to_string_lossy(), "hub", "ping"]) {
+            } else if self.succeeds(&[&ping.to_string_lossy(), "hub", "ping"]) {
                 ok("hub answers");
             } else {
+                #[cfg(unix)]
                 fail("hub not answering → pkill -f '(^|/)cockpit hub$'; the apps start a new one");
+                #[cfg(windows)]
+                fail("hub not answering → cockpit hub stop; the apps start a new one");
             }
         }
         let config = files::config_dir().join("config.json");
@@ -262,7 +301,7 @@ impl Doctor {
         if std::fs::symlink_metadata(&bin).is_err() {
             return;
         }
-        let through = self.link.join("bin/cockpit");
+        let through = self.link.join("bin").join(platform::exe_name("cockpit"));
         let fix = "→ ln -sfn ~/.config/cockpit/herdr/bin/cockpit ~/.local/bin/cockpit";
         match (bin.canonicalize(), through.canonicalize()) {
             (Ok(linked), Ok(current)) if linked == current => ok("link ~/.local/bin/cockpit is current"),

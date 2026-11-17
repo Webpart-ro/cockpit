@@ -50,7 +50,8 @@ export const isNotInstalled = (e) => String(e?.message ?? e ?? "").includes(NOT_
 export function openUrl(url) {
   const platform = win()?.platform;
   if (platform === "macos") return exec("open", [url]);
-  if (platform === "windows") return exec("cmd", ["/c", "start", "", url]);
+  // Not cmd /c start: cmd runs whatever follows an `&` in the URL. Web links only, as a join link comes from a calendar invite.
+  if (platform === "windows") return /^https?:\/\//i.test(url) ? exec("rundll32", ["url.dll,FileProtocolHandler", url]) : Promise.reject(new Error(`not a web link: ${url}`));
   return exec("xdg-open", [url]);
 }
 
@@ -165,6 +166,19 @@ async function connect(state) {
   }
 }
 
+/** The program to exec for `name`. On Windows exec() finds only .exe files on the app's PATH, so Git's tools (env, sh)
+ *  are named by the folder `cockpit app install` recorded. */
+export async function tool(name) {
+  if (win()?.platform !== "windows") return name;
+  const { unixbin } = await install();
+  if (!unixbin) throw new Error("cockpit.json does not name Git's tools: re-run `cockpit app install`");
+  return `${unixbin}/${name}.exe`;
+}
+
+/** exec() of a command that may be a .cmd shim (code, cursor). On Windows the shim is run by name, never through cmd /c, so the
+ *  arguments are escaped for a batch file and no path can inject a command; an editor shipping an .exe is run as it is. */
+export const execCommand = (name, args) => (win()?.platform === "windows" ? exec(`${name}.cmd`, args).catch(() => exec(name, args)) : exec(name, args));
+
 /** Runs the cockpit binary on the install's HOME, driving this Herdr window: { code, stdout, stderr }. */
 export async function cockpit(args) {
   const { bin, home, env = {}, machine, host } = await install();
@@ -190,7 +204,10 @@ export async function cockpit(args) {
     if (args[0] !== "hub" || !(["start", "ping", "shown"].includes(args[1]) || review)) throw new Error(READ_ONLY);
     return exec("env", [...vars, `HOME=${home}`, `COCKPIT_HUB_LISTEN=${host}`, "COCKPIT_FRONTEND=app", bin, ...args], { on: machine });
   }
-  return exec("env", [`HOME=${home}`, `HERDR_APP_HOME=${appHome()}`, "COCKPIT_FRONTEND=app", ...vars, bin, ...args]);
+  const own = [`HOME=${home}`, `HERDR_APP_HOME=${appHome()}`, "COCKPIT_FRONTEND=app", ...vars];
+  // Git's env.exe re-quotes and path-converts the arguments it hands a Windows program, so cockpit takes its environment itself.
+  if (win()?.platform === "windows") return exec(bin, [...own.flatMap((v) => ["--env", v]), ...args]);
+  return exec(await tool("env"), [...own, bin, ...args]);
 }
 
 /** One request: its answer, or a thrown Error with the hub's `error`. */

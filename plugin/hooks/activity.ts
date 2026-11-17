@@ -1,6 +1,6 @@
 import type { EngineInterface } from 'claude-code'
 
-import { cacheDir, writeAtomic } from './config'
+import { cacheDir, isWindows, writeAtomic } from './config'
 
 type $ = EngineInterface
 
@@ -23,7 +23,9 @@ export async function logActivity($: $, tab: string | undefined, entry: Omit<Act
 async function appendActivity($: $, tab: string, line: string) {
   const dir = `${await cacheDir($)}/activity`
   const path = `${dir}/${tab}.jsonl`
-  await $.process.run(['sh', '-c', 'mkdir -p "$1" && printf "%s\\n" "$3" >> "$2"', 'sh', dir, path, line])
+  // The queue keeps appends in order; $.fs.write makes the folder, where sh may be missing on Windows.
+  if (await isWindows($)) await $.fs.write(path, `${await $.fs.read(path).catch(() => '')}${line}\n`)
+  else await $.process.run(['sh', '-c', 'mkdir -p "$1" && printf "%s\\n" "$3" >> "$2"', 'sh', dir, path, line])
   const count = (appended.get(path) ?? 0) + 1
   appended.set(path, count)
   if (count % 50 !== 0) return

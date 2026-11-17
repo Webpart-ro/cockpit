@@ -8,7 +8,7 @@
 
 import { div } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, InputState, TextView, h_resizable, resizable_panel } from "gpui-base";
-import { exec, readTextFile, writeTextFile, watchFolder, theme, settings, props, run, panes, home, shared, setShared, appHome, focused } from "herdr";
+import { exec, readTextFile, writeTextFile, watchFolder, theme, settings, props, run, panes, home, shared, setShared, appHome, focused, window as win } from "herdr";
 import * as hub from "./hub.js";
 import { tokens, TEXT, Icon, Button, Kbd, TextField, Toaster } from "./ui.js";
 
@@ -34,7 +34,11 @@ export async function openCode(file, { terminal, line } = {}) {
   if (open && all.some((p) => p.pane === open)) run("pane.close", { pane: open });
   const args = { direction: "right", ...(beside ? { pane: beside.pane } : {}), mod: "cockpit", props: { app: "code", file, line, terminal: terminal ?? beside?.terminal, tab } };
   // Through herdr-app, which answers with the new pane: run() gives nothing back.
-  const r = await exec("env", [`HERDR_APP_HOME=${appHome()}`, `${home()}/.local/bin/herdr-app`, "do", "pane.split", JSON.stringify(args)]).catch(() => null);
+  const windows = win()?.platform === "windows";
+  const herdr = windows ? "herdr-app" : `${home()}/.local/bin/herdr-app`;
+  // shortcut: a non-default HERDR_APP_HOME splits in the default home and falls back to run(), losing SHOWN; upgrade when exec gets an env option.
+  const split = ["do", "pane.split", JSON.stringify(args)];
+  const r = await (windows ? exec(herdr, split) : exec(await hub.tool("env"), [`HERDR_APP_HOME=${appHome()}`, herdr, ...split])).catch(() => null);
   const made = r?.code === 0 ? JSON.parse(r.stdout || "{}").pane : null;
   if (!made) run("pane.split", args);
   else if (tab) setShared(SHOWN, { ...(shared(SHOWN) ?? {}), [tab]: made });
@@ -205,7 +209,7 @@ export default class Code {
       .when(Boolean(this.dirty), (e) => e.child(Button("code-save", { label: "Save", icon: "check", size: "sm", kbd: "⌘S", onClick: (_e, cx) => this.save(cx) })))
       .when(md, (e) => e.child(Button("code-md", { icon: this.mdMode === "preview" ? "file-text" : "eye", variant: "ghost", size: "icon-sm", tooltip: `Preview: ${this.mdMode}  ⌘⇧V`, onClick: (_e, cx) => ((this.mdMode = MD_NEXT[this.mdMode]), cx.notify()) })))
       .child(Button("code-ask", { label: "Ask the agent", icon: "message-square", variant: this.asking ? "secondary" : "outline", size: "sm", tooltip: "A note about this file, or lines of it, sent to the agent", onClick: (_e, cx) => ((this.asking = !this.asking), this.asking && this.ask.focus(), cx.notify()) }))
-      .child(Button("code-vscode", { icon: "external", variant: "ghost", size: "icon-sm", tooltip: "Open in VS Code", onClick: () => exec("code", ["-g", `${this.file}${this.line ? `:${this.line}` : ""}`]).catch(() => {}) }))
+      .child(Button("code-vscode", { icon: "external", variant: "ghost", size: "icon-sm", tooltip: "Open in VS Code", onClick: () => hub.execCommand("code", ["-g", `${this.file}${this.line ? `:${this.line}` : ""}`]).catch(() => {}) }))
       .child(Button("code-close", { icon: "x", variant: "ghost", size: "icon-sm", tooltip: "Close", onClick: () => this.closePane() }));
     let body;
     if (!this.file) body = div().p(16).text_color(k.dim).child("No file given.");

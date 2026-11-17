@@ -20,9 +20,12 @@ pub mod store;
 mod value;
 pub mod views;
 
+use cockpit_core::platform;
 use std::io::Write;
 use std::net::TcpListener;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -44,10 +47,22 @@ pub fn run() {
         search::sessions::index_once();
         return;
     }
+    #[cfg(windows)]
+    let _lock = match lock_hub() {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!("cockpit hub: {error}");
+            return;
+        }
+    };
     // Its own session: closing the pane of the app that started it does not take the hub down.
     // SAFETY: setsid has no memory effects; it fails harmlessly when the hub already leads a group.
-    unsafe { libc::setsid() };
+    #[cfg(unix)]
+    unsafe {
+        libc::setsid()
+    };
     let socket = cockpit_core::hub::socket();
+    #[cfg(unix)]
     if UnixStream::connect(&socket).is_ok() {
         return;
     }
@@ -64,6 +79,7 @@ pub fn run() {
     if let Some(dir) = socket.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    #[cfg(unix)]
     let listener = match UnixListener::bind(&socket) {
         Ok(listener) => listener,
         // Said on stderr, which the app that started the hub points at ~/.cache/cockpit/hub.log.
@@ -72,11 +88,28 @@ pub fn run() {
             return;
         }
     };
+    #[cfg(unix)]
     let inode = std::fs::metadata(&socket).map(|m| m.ino()).unwrap_or_default();
+    #[cfg(windows)]
+    let inode = u64::from(std::process::id());
     let _ = cockpit_core::notify::GUI.set(views::notify);
     // The store opens before the first request, waiting out a hub that hands over to this one.
     drop(store::global());
     let last = Arc::new(AtomicU64::new(server::now_secs()));
+    #[cfg(unix)]
+    std::thread::spawn({
+        let (last, socket) = (last.clone(), socket.clone());
+        move || exit_when_idle(&socket, inode, &last)
+    });
+    #[cfg(windows)]
+    let (listener, token) = match serve_tcp(tcp, last.clone()) {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("cockpit hub: cannot start TCP: {error}");
+            return;
+        }
+    };
+    #[cfg(windows)]
     std::thread::spawn({
         let (last, socket) = (last.clone(), socket.clone());
         move || exit_when_idle(&socket, inode, &last)
@@ -89,14 +122,32 @@ pub fn run() {
         let dir = files::herdr_dir();
         cockpit_update::keep_current(&dir, |binary| hand_over(&dir, binary, &socket, inode));
     });
+    #[cfg(unix)]
     if let Err(error) = serve_tcp(tcp, last.clone()) {
         eprintln!("cockpit hub: cannot start TCP: {error}");
     }
+    #[cfg(unix)]
     let gate = server::Gate { token: None, frontend: None, read_only: false };
+    #[cfg(windows)]
+    let gate = server::Gate { token: Some(token), frontend: None, read_only: false };
     for stream in listener.incoming().flatten() {
         last.store(server::now_secs(), Ordering::SeqCst);
         let (last, gate) = (last.clone(), gate.clone());
         std::thread::spawn(move || server::serve(stream, last, gate));
+    }
+}
+
+#[cfg(windows)]
+fn lock_hub() -> std::io::Result<std::fs::File> {
+    std::fs::create_dir_all(files::cache())?;
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(files::cache().join("hub.lock"))?;
+    let start = std::time::Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) if start.elapsed() < Duration::from_secs(5) => std::thread::sleep(Duration::from_millis(25)),
+            Err(error) => return Err(std::io::Error::other(format!("another hub holds hub.lock, or it cannot be locked: {error}"))),
+        }
     }
 }
 
@@ -106,9 +157,17 @@ pub fn tcp_file() -> PathBuf {
 }
 
 /// A random token from the system's source, as hex.
+#[cfg(unix)]
 fn token() -> std::io::Result<String> {
     let mut bytes = [0u8; 16];
     std::io::Read::read_exact(&mut std::fs::File::open("/dev/urandom")?, &mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+#[cfg(windows)]
+fn token() -> std::io::Result<String> {
+    let mut bytes = [0u8; 16];
+    platform::random_bytes(&mut bytes)?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
@@ -123,6 +182,7 @@ fn listen() -> std::io::Result<(TcpListener, std::net::IpAddr)> {
 }
 
 /// Serves that port: hub.json carries the token each request needs, and off loopback the connection reads only.
+#[cfg(unix)]
 fn serve_tcp((listener, host): (TcpListener, std::net::IpAddr), last: Arc<AtomicU64>) -> std::io::Result<()> {
     let port = listener.local_addr()?.port();
     let token = token()?;
@@ -130,7 +190,8 @@ fn serve_tcp((listener, host): (TcpListener, std::net::IpAddr), last: Arc<Atomic
     let path = tcp_file();
     let tmp = path.with_extension("tmp");
     let _ = std::fs::remove_file(&tmp);
-    let written = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp).and_then(|mut f| f.write_all(info.to_string().as_bytes()));
+    let written =
+        platform::private_file(std::fs::OpenOptions::new().write(true).create_new(true)).open(&tmp).and_then(|mut f| f.write_all(info.to_string().as_bytes()));
     written.and_then(|_| std::fs::rename(&tmp, &path))?;
     let gate = server::Gate { token: Some(token), frontend: Some(cockpit_core::frontend::Frontend::App), read_only: !host.is_loopback() };
     std::thread::spawn(move || {
@@ -143,6 +204,29 @@ fn serve_tcp((listener, host): (TcpListener, std::net::IpAddr), last: Arc<Atomic
     Ok(())
 }
 
+#[cfg(windows)]
+fn serve_tcp((listener, host): (TcpListener, std::net::IpAddr), last: Arc<AtomicU64>) -> std::io::Result<(TcpListener, String)> {
+    let local = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+    let port = listener.local_addr()?.port();
+    let local_port = local.local_addr()?.port();
+    let token = token()?;
+    let info = serde_json::json!({"host": host.to_string(), "port": port, "local_port": local_port, "token": token, "pid": std::process::id()});
+    let path = tcp_file();
+    let tmp = path.with_extension("tmp");
+    let _ = std::fs::remove_file(&tmp);
+    platform::private_file(std::fs::OpenOptions::new().write(true).create_new(true)).open(&tmp)?.write_all(info.to_string().as_bytes())?;
+    std::fs::rename(&tmp, &path)?;
+    let gate = server::Gate { token: Some(token.clone()), frontend: Some(cockpit_core::frontend::Frontend::App), read_only: !host.is_loopback() };
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            last.store(server::now_secs(), Ordering::SeqCst);
+            let (last, gate) = (last.clone(), gate.clone());
+            std::thread::spawn(move || server::serve(stream, last, gate));
+        }
+    });
+    Ok((local, token))
+}
+
 /// Takes hub.json away when it names this hub.
 fn drop_tcp_file() {
     let path = tcp_file();
@@ -153,7 +237,10 @@ fn drop_tcp_file() {
 
 /// A newer binary went into bin/: a hub run from it takes the socket over, the space apps restart on it, this one ends.
 fn hand_over(dir: &Path, binary: &Path, socket: &Path, inode: u64) {
+    #[cfg(windows)]
+    let _ = (socket, inode);
     drop_tcp_file();
+    #[cfg(unix)]
     if std::fs::metadata(socket).is_ok_and(|m| m.ino() == inode) {
         let _ = std::fs::remove_file(socket);
     }
@@ -166,6 +253,7 @@ fn hand_over(dir: &Path, binary: &Path, socket: &Path, inode: u64) {
 /// Whether a pinned space's app runs, which keeps the hub fetching for it, requests or not. Only this hub's own count:
 /// one under another HOME (a test sandbox) talks to a hub of its own.
 fn space_apps_running() -> bool {
+    // pgrep finds the herdr TUI's space apps, which Windows has none of: false there is right.
     let Ok(out) = std::process::Command::new("pgrep").args(["-f", "cockpit (inbox|runbook|todo|meetings|monitor|routines|mail) cockpit-space"]).output() else {
         return false;
     };
@@ -175,6 +263,7 @@ fn space_apps_running() -> bool {
 
 /// A process's HOME, when the system says: /proc on Linux, `ps e` on macOS.
 fn home_of(pid: u32) -> Option<PathBuf> {
+    // only space_apps_running asks, and it finds no space app on Windows.
     if let Ok(environ) = std::fs::read(format!("/proc/{pid}/environ")) {
         return environ.split(|b| *b == 0).find_map(|v| v.strip_prefix(b"HOME=")).map(|h| PathBuf::from(String::from_utf8_lossy(h).into_owned()));
     }
@@ -185,8 +274,14 @@ fn home_of(pid: u32) -> Option<PathBuf> {
 
 /// Whether the socket path still holds this hub's own socket: gone (its folder removed) or taken by a newer hub, this
 /// one has no one left to serve.
+#[cfg(unix)]
 fn socket_is_ours(socket: &Path, inode: u64) -> bool {
     std::fs::metadata(socket).is_ok_and(|m| m.ino() == inode)
+}
+
+#[cfg(windows)]
+fn socket_is_ours(_socket: &Path, pid: u64) -> bool {
+    files::load(&tcp_file()).is_some_and(|v| v["pid"].as_u64() == Some(pid))
 }
 
 fn exit_when_idle(socket: &Path, inode: u64, last: &AtomicU64) {
@@ -220,7 +315,7 @@ fn watch() {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

@@ -5,7 +5,7 @@
 //! A run is `sh -c '"$@"; echo $? > <id>.exit'` around the routine's command, in its own process group, its output in
 //! ~/.cache/cockpit/routines/<slug>/<id>.{out,err} and what the app shows in <id>.txt.
 
-use std::os::unix::process::CommandExt;
+use cockpit_core::platform;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -483,7 +483,7 @@ fn start(setup: &Setup, r: &Routine, why: &str, event: &Value, now: u64, cap: Op
         Some(a) if is_claude => claude_argv(&a.path(), r, prompt(r, why, event, now), &session, cap, &known_servers(setup)),
         Some(a) => agent_argv(a, r, &prompt(r, why, event, now))?,
         None if r.run == Run::Agent => return Err(format!("no agent {:?}", r.agent)),
-        None => vec!["sh".into(), "-c".into(), r.body.clone()],
+        None => vec![platform::shell().to_string_lossy().into_owned(), "-c".into(), r.body.clone()],
     };
     // An agent's run without a folder gets its own, where no project's instructions and memory are read.
     let cwd = match (r.cwd.is_empty(), r.run) {
@@ -497,29 +497,36 @@ fn start(setup: &Setup, r: &Routine, why: &str, event: &Value, now: u64, cap: Op
     let worktree = if r.worktree { Some(worktree(&setup.worktrees, &cwd, &r.slug, &id)?) } else { None };
     let cwd = worktree.as_ref().and_then(|w| w["cwd"].as_str()).map_or(cwd.clone(), str::to_string);
     let exit = setup.run_file(&r.slug, &id, "exit");
-    let mut argv = vec!["sh".to_string(), "-c".into(), "\"$@\"; echo \"$?\" > \"$0\"".into(), exit.to_string_lossy().into_owned()];
+    let mut argv =
+        vec![platform::shell().to_string_lossy().into_owned(), "-c".into(), "\"$@\"; echo \"$?\" > \"$0\"".into(), exit.to_string_lossy().into_owned()];
     argv.extend(command);
     // The command as run, to replay a run that went wrong.
     let _ = files::write(&setup.run_file(&r.slug, &id, "cmd"), &json!({"argv": argv, "cwd": cwd}));
     let out = std::fs::File::create(setup.run_file(&r.slug, &id, "out")).map_err(|e| e.to_string())?;
     let err = std::fs::File::create(setup.run_file(&r.slug, &id, "err")).map_err(|e| e.to_string())?;
     let mut child = Command::new(&argv[0]);
-    child.args(&argv[1..]).current_dir(&cwd).stdin(Stdio::null()).stdout(out).stderr(err).process_group(0);
+    platform::new_group(platform::args(&mut child, &argv[1..]).current_dir(&cwd).stdin(Stdio::null()).stdout(out).stderr(err));
     // A hub started from inside a Claude session must not make the run think it is nested in it.
     for var in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"] {
         child.env_remove(var);
     }
     let path = std::env::var("PATH").unwrap_or_default();
     let home = files::home().to_string_lossy().into_owned();
+    #[cfg(unix)]
     child.env("PATH", format!("{path}:/opt/homebrew/bin:/usr/local/bin:{home}/.local/bin:{home}/.claude/local"));
+    #[cfg(windows)]
+    child.env("PATH", format!("{path};{home}\\.local\\bin;{home}\\.claude\\local"));
     child.env("COCKPIT_ROUTINE", &r.slug).env("COCKPIT_ROUTINE_WHY", why);
     for (var, field) in [("COCKPIT_EVENT", "title"), ("COCKPIT_EVENT_KEY", "key"), ("COCKPIT_EVENT_KIND", "kind")] {
         child.env(var, event[field].as_str().unwrap_or_default());
     }
-    let mut child = child.spawn().map_err(|e| e.to_string())?;
+    let mut child = platform::spawn_in_job(&mut child).map_err(|e| e.to_string())?;
     let pid = child.id();
     // Reaped as soon as it ends; its end is read from its exit file.
-    std::thread::spawn(move || child.wait());
+    std::thread::spawn(move || {
+        let _ = child.wait();
+        platform::release(pid.into());
+    });
     let agent = agent.map(|a| a.id.clone());
     Ok(
         json!({"id": id, "pid": pid, "started": now, "why": why, "session": session, "agent": agent, "event": event, "timeout": r.timeout, "worktree": worktree}),
@@ -598,16 +605,12 @@ pub fn remove_worktree(wt: &Value) -> Result<(), String> {
 }
 
 fn alive(pid: u64) -> bool {
-    // SAFETY: signal 0 only asks whether the process exists.
-    pid > 0 && unsafe { libc::kill(pid as i32, 0) } == 0
+    platform::alive(pid)
 }
 
 /// Sends the run's process group a signal.
-fn signal(pid: u64, sig: i32) {
-    if pid > 0 {
-        // SAFETY: the group is the run's own, started with process_group(0).
-        unsafe { libc::kill(-(pid as i32), sig) };
-    }
+fn signal(pid: u64, force: bool) {
+    platform::signal_group(pid, force);
 }
 
 /// Asks a running routine to stop: the run ends as stopped.
@@ -615,7 +618,7 @@ pub fn stop(doc: &mut Value, slug: &str, now: u64) -> bool {
     let running = &mut doc["running"][slug];
     let Some(pid) = running["pid"].as_u64() else { return false };
     running["stopping"] = json!(now);
-    signal(pid, libc::SIGTERM);
+    signal(pid, false);
     true
 }
 
@@ -634,7 +637,7 @@ fn finish(doc: &mut Value, setup: &Setup, all: &[Routine], now: u64, notify: Not
                 doc["running"][&slug]["timedOut"] = json!(true);
                 stop(doc, &slug, now);
             } else if stopping.is_some_and(|at| now > at + KILL_AFTER_MS) {
-                signal(pid, libc::SIGKILL);
+                signal(pid, true);
             }
             continue;
         }
@@ -900,7 +903,8 @@ mod tests {
                 bin("codex"),
                 format!(
                     "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}/codex-argv\necho 'session id: 01a1a225-4c95-7690-83de-431af47ed55f' >&2\necho 'Looked at 2 PRs'\necho 'both green'\n",
-                    dir.path().display()
+                    // Forward slashes: sh reads a backslash in the script as an escape.
+                    dir.path().to_string_lossy().replace('\\', "/")
                 ),
             )
             .unwrap();
@@ -910,7 +914,7 @@ mod tests {
                 bin("claude"),
                 format!(
                     "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}/argv\necho '{{\"type\":\"system\",\"subtype\":\"init\",\"mcp_servers\":[{{\"name\":\"claude.ai Slack\"}},{{\"name\":\"claude.ai Datadog\"}},{{\"name\":\"platform\"}}]}}'\necho '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"name\":\"mcp__claude_ai_Slack__slack_send_message\"}}]}}}}'\nprintf '{{\"type\":\"result\",\"is_error\":false,\"result\":\"Swept 3 PRs\\\\nall green\",\"session_id\":\"%s\",\"total_cost_usd\":0.12}}\\n' \"$7\"\n",
-                    dir.path().display()
+                    dir.path().to_string_lossy().replace('\\', "/")
                 ),
             )
             .unwrap();
@@ -1195,6 +1199,37 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         let doc = w.settle(now + 62_000);
         assert_eq!(doc["runs"]["slow1"][0]["summary"], "timed out after 1 min");
+    }
+
+    /// MSYS pids are not Windows pids, so the body reads the Windows one from /proc.
+    #[cfg(windows)]
+    #[test]
+    fn stopping_a_run_ends_its_whole_process_tree() {
+        let mut w = World::new();
+        let pids = w._dir.path().to_string_lossy().replace('\\', "/") + "/child-winpid";
+        w.write("tree", &format!("---\nrun: shell\nnotify: never\n---\nsleep 60 &\ncat /proc/$!/winpid > {pids}\nsleep 60"));
+        let now = now_ms();
+        w.round(now);
+        run_now(&mut w.store, &w.setup, "tree", now, &mut |_, _, _, _| {});
+        let started = std::time::Instant::now();
+        let child = loop {
+            if let Some(pid) = std::fs::read_to_string(&pids).ok().and_then(|t| t.trim().parse::<u64>().ok()) {
+                break pid;
+            }
+            assert!(started.elapsed() < Duration::from_secs(10), "the run never started its child");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let run = w.store.get(DOC)["running"]["tree"]["pid"].as_u64().unwrap();
+        assert!(platform::alive(child) && platform::alive(run));
+        change(&mut w.store, now, |doc| {
+            stop(doc, "tree", now);
+        });
+        let stopped = std::time::Instant::now();
+        while (platform::alive(child) || platform::alive(run)) && stopped.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!platform::alive(run), "the run's shell outlived its stop");
+        assert!(!platform::alive(child), "the run's child outlived its stop");
     }
 
     #[test]

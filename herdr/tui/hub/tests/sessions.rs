@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! Past agent sessions through the socket, from the fixture box's transcripts: indexed in the background once the hub
 //! starts, found after the apps' own entries, and a fork of one opened in a tab of the actions space.
 

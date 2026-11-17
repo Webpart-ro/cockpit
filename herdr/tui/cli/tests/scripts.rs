@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! The plugin's shell scripts that start the binary: app.sh and cockpit.sh find it, fetch-apps.sh installs it from a
 //! release (served here by a small HTTP server) or has a binary do it, update.sh stops the spaces' supervisors, their
 //! apps and the hub, pin-spaces.sh orders the spaces, browse.sh and shots.sh hand their arguments to the cockpit command,

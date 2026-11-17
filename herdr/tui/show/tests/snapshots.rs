@@ -67,7 +67,13 @@ fn app(fixture: &str, width: u16, density: Density, test: &str) -> ShowApp {
     let dir = root().join(format!("{test}-{fixture}-{width}-{density:?}"));
     std::fs::create_dir_all(&dir).unwrap();
     let spec = std::fs::read_to_string(fixtures().join(format!("{fixture}.json"))).unwrap();
-    std::fs::write(dir.join("view.json"), spec.replace("{fixtures}", &root().join("pictures").to_string_lossy())).unwrap();
+    let pictures = root().join("pictures").to_string_lossy().into_owned();
+    #[cfg(windows)]
+    let pictures = {
+        let quoted = serde_json::to_string(&pictures).unwrap();
+        quoted[1..quoted.len() - 1].to_string()
+    };
+    std::fs::write(dir.join("view.json"), spec.replace("{fixtures}", &pictures)).unwrap();
     let mut app = ShowApp::new("view".into(), dir, Picker::halfblocks()).with_density(density);
     app.settle(width, 40);
     app

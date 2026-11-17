@@ -1,0 +1,5 @@
+# Checkouts keep LF on every OS (Git for Windows defaults to core.autocrlf=true): test fixtures and snapshots compare bytes.
+* text=auto eol=lf
+# Kept as generated or as the format requires.
+*.ics -text
+herdr/tui/THIRD_PARTY_CRATES.md -text

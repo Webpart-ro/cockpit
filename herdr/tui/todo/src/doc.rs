@@ -66,13 +66,16 @@ impl Doc {
             None if self.lines.len() > 1 && self.lines.last().is_some_and(String::is_empty) => self.lines.len() - 1,
             None => self.lines.len(),
         };
-        self.lines.insert(at, line_of(false, text));
+        // A CRLF file (Notepad, a Windows checkout) gets a CRLF line, not a mixed ending.
+        let cr = if self.lines.iter().any(|l| l.ends_with('\r')) { "\r" } else { "" };
+        self.lines.insert(at, format!("{}{cr}", line_of(false, text)));
     }
 
     /// The item on `line` rewritten; the others keep their place.
     pub fn set(&mut self, line: usize, done: bool, text: &str) {
         if let Some(raw) = self.lines.get_mut(line) {
-            *raw = line_of(done, text);
+            let cr = if raw.ends_with('\r') { "\r" } else { "" };
+            *raw = format!("{}{cr}", line_of(done, text));
         }
     }
 
@@ -124,6 +127,19 @@ impl Doc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_crlf_file_keeps_crlf_on_every_line_an_edit_writes() {
+        let mut doc = Doc::parse("# To-do\r\n\r\n- [ ] one\r\n- [ ] two\r\n");
+        doc.add("new");
+        let two = doc.items()[2].line;
+        doc.set(two, true, "two");
+        assert_eq!(doc.text(), "# To-do\r\n\r\n- [ ] new\r\n- [ ] one\r\n- [x] two\r\n");
+        assert_eq!(doc.items().iter().map(|i| i.text.as_str()).collect::<Vec<_>>(), ["new", "one", "two"]);
+        let mut lf = Doc::parse("# To-do\n\n- [ ] one\n");
+        lf.add("new");
+        assert_eq!(lf.text(), "# To-do\n\n- [ ] new\n- [ ] one\n");
+    }
 
     #[test]
     fn reads_items_around_other_lines() {

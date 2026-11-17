@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! The hub's feed against a fake GitHub (and Linear) served on a local port: the inbox and CI caches it writes, what it
 //! keeps of the mod's, its notifications, and a rate limit it waits out.
 

@@ -1,6 +1,7 @@
 //! The herdr folder as an update sees it: the plugin's version, the one in bin/, a dev build, and the lock that keeps
 //! two updates (this one and fetch-apps.sh's) from writing bin/ at once.
 
+use cockpit_core::platform;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -17,12 +18,11 @@ pub fn installed(dir: &Path) -> Option<String> {
 
 /// A checkout that builds its own binary runs that one and needs no release.
 pub fn dev_build(dir: &Path) -> bool {
-    dir.join("tui/target/release/cockpit").is_file()
+    dir.join("tui/target/release").join(platform::exe_name("cockpit")).is_file()
 }
 
 pub fn has_binary(dir: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(dir.join("bin/cockpit")).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    platform::executable(&dir.join("bin").join(platform::exe_name("cockpit")))
 }
 
 /// `fetch.lock`, the folder fetch-apps.sh takes too; one left by a killed run expires after 10 minutes.

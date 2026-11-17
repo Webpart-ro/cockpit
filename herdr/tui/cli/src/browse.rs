@@ -124,6 +124,7 @@ fn browser_tty(terminal: &str) -> Option<String> {
         return None;
     }
     let pid = found["foreground"]["pid"].as_u64()?.to_string();
+    // terminal-browser panes are located by tty; Windows has none, so no browser is found.
     let tty = run(&["ps", "-o", "tty=", "-p", &pid], TIMEOUT)?.stdout.trim().to_string();
     (!tty.is_empty() && tty != "??").then(|| format!("/dev/{}", tty.trim_start_matches("/dev/")))
 }
@@ -242,6 +243,7 @@ fn real_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+#[cfg(unix)]
 fn same_page(a: &str, b: &str) -> bool {
     let norm = |url: &str| {
         let url = if url.starts_with('/') { format!("file://{}", real_path(Path::new(url)).display()) } else { url.to_string() };
@@ -250,7 +252,24 @@ fn same_page(a: &str, b: &str) -> bool {
     norm(a) == norm(b)
 }
 
+#[cfg(windows)]
+fn same_page(a: &str, b: &str) -> bool {
+    let norm = |url: &str| {
+        let path = url.strip_prefix("file://").unwrap_or(url).replace('\\', "/");
+        let path = path.strip_prefix("//?/").unwrap_or(&path);
+        let path = if path.starts_with('/') && path.as_bytes().get(2) == Some(&b':') { &path[1..] } else { path };
+        if Path::new(path).is_absolute() {
+            let real = real_path(Path::new(path)).to_string_lossy().replace('\\', "/");
+            real.strip_prefix("//?/").unwrap_or(&real).trim_end_matches('/').to_lowercase()
+        } else {
+            url.trim_end_matches('/').to_string()
+        }
+    };
+    norm(a) == norm(b)
+}
+
 /// The tty's size in pixels, from the shell running in the pane.
+#[cfg(unix)]
 fn pixels(pane: &Value) -> Option<(f64, f64)> {
     let info = herdr(&["pane", "process-info", "--pane", &field(pane, "pane_id")]).unwrap_or(Value::Null);
     let pid = &info["process_info"]["shell_pid"];
@@ -258,6 +277,7 @@ fn pixels(pane: &Value) -> Option<(f64, f64)> {
         return None;
     }
     let pid = field(&info["process_info"], "shell_pid");
+    // the pane's tty (for the pixel size) has no Windows form.
     let tty = run(&["ps", "-o", "tty=", "-p", &pid], TIMEOUT)?.stdout.trim().to_string();
     if tty.is_empty() || tty == "??" {
         return None;
@@ -270,6 +290,11 @@ fn pixels(pane: &Value) -> Option<(f64, f64)> {
         return None;
     }
     Some((f64::from(size.ws_xpixel), f64::from(size.ws_ypixel)))
+}
+
+#[cfg(windows)]
+fn pixels(_pane: &Value) -> Option<(f64, f64)> {
+    None // accepted limit on Windows: the cell size is not read (crossterm is not a CLI dependency), so the picker guesses a font size
 }
 
 /// The fraction of the pane a new split takes: as wanted, but small enough for herdr to send its frames as files.
@@ -339,6 +364,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let real = std::fs::canonicalize(dir.path()).unwrap();
         assert!(same_page(&format!("{}/page.html", dir.path().display()), &format!("file://{}/page.html", real.display())));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_file_urls_match_drive_and_verbatim_paths() {
+        assert!(same_page(r"C:\acme\page.html", "file:///C:/acme/page.html"));
+        assert!(same_page(r"\\?\C:\acme\page.html", "file:///C:/acme/page.html"));
+        assert!(!same_page(r"C:\acme\page.html", "file:///C:/acme/other.html"));
     }
 
     #[test]

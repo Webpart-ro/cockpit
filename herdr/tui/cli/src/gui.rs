@@ -2,6 +2,7 @@
 //! the app crates), `cockpit hub start` the mod runs, and `cockpit app install` that puts the layout, the mod and its
 //! keys into the Herdr app's home.
 
+use cockpit_core::platform;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -93,19 +94,22 @@ pub fn hub_start() {
 }
 
 fn alive(pid: u64) -> bool {
-    // SAFETY: kill with signal 0 only checks the process exists.
-    pid > 0 && unsafe { libc::kill(pid as i32, 0) } == 0
+    platform::alive(pid)
 }
 
-/// The hubs of this home: the one hub.json names and whoever holds the unix socket, which can be another one.
-fn hubs() -> Vec<u64> {
+/// The hubs of this home: the one hub.json names and, on Unix, whoever holds the socket, which can be another one.
+pub(crate) fn hubs() -> Vec<u64> {
     let named = files::load(&files::cache().join("hub.json")).and_then(|i| i["pid"].as_u64());
+    // there is no socket: the hubs of a home are the one hub.json names, and its lock admits no other.
+    #[cfg(unix)]
     let held = std::process::Command::new("lsof")
         .arg("-t")
         .arg(cockpit_core::hub::socket())
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default();
+    #[cfg(windows)]
+    let held = String::new();
     let mut pids: Vec<u64> = named.into_iter().chain(held.lines().filter_map(|l| l.trim().parse().ok())).collect();
     pids.sort_unstable();
     pids.dedup();
@@ -113,6 +117,7 @@ fn hubs() -> Vec<u64> {
     pids
 }
 
+#[cfg(unix)]
 fn is_hub(pid: u64) -> bool {
     let command = std::process::Command::new("ps")
         .args(["-o", "command=", "-p", &pid.to_string()])
@@ -122,11 +127,19 @@ fn is_hub(pid: u64) -> bool {
     command.trim_end().ends_with("cockpit hub")
 }
 
+/// Windows has no command line to read without WMI: the process image being a cockpit executable is the check, enough
+/// against a recycled pid because the pid comes from this home's hub.json.
+#[cfg(windows)]
+fn is_hub(pid: u64) -> bool {
+    let name = |p: &std::path::Path| p.file_name().map(|n| n.to_ascii_lowercase());
+    let ours = std::env::current_exe().ok().and_then(|p| name(&p));
+    platform::image(pid).is_some_and(|image| ours.is_some() && name(&image) == ours)
+}
+
 /// SIGTERM to each, then waits a few seconds for them to go.
 fn stop(pids: &[u64]) {
     for &pid in pids {
-        // SAFETY: a plain SIGTERM to a hub's own pid.
-        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        platform::terminate(pid);
     }
     let started = Instant::now();
     while pids.iter().any(|&p| alive(p)) && started.elapsed() < Duration::from_secs(3) {
@@ -252,7 +265,22 @@ fn place(from: &Path, to: &Path, link: bool) -> std::io::Result<()> {
     if let Some(dir) = to.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    if link { std::os::unix::fs::symlink(from, to) } else { std::fs::copy(from, to).map(|_| ()) }
+    #[cfg(unix)]
+    {
+        if link { platform::link_dir(from, to) } else { std::fs::copy(from, to).map(|_| ()) }
+    }
+    #[cfg(windows)]
+    {
+        if link && from.is_dir() {
+            platform::link_dir(from, to)
+        } else if link {
+            // A hard link needs no privilege and follows edits made in place; it goes stale when the source is replaced by a
+            // new file (as git does), and across volumes it fails: then a copy stands in.
+            std::fs::hard_link(from, to).or_else(|_| std::fs::copy(from, to).map(|_| ()))
+        } else {
+            std::fs::copy(from, to).map(|_| ())
+        }
+    }
 }
 
 /// Every file under a folder, folders followed, as paths relative to it.
@@ -267,11 +295,24 @@ fn tree(dir: &Path, under: &Path, out: &mut Vec<PathBuf>) {
 /// Puts the layout and the mod in place (copied, or the folder linked to the checkout), writes cockpit.json for the mod
 /// and merges the keys; the lines say what it did.
 pub fn install(from: &Path, home: &Path, link: bool) -> Result<Vec<String>, String> {
+    install_with(from, home, link, &platform::shell())
+}
+
+/// `install` with the shell whose folder holds the unix tools the mod runs on Windows.
+fn install_with(from: &Path, home: &Path, link: bool, shell: &Path) -> Result<Vec<String>, String> {
     if !from.join("mods/cockpit/main.js").exists() {
         return Err(format!("no cockpit mod in {}: pass --from <the checkout's app folder>", from.display()));
     }
     let mut lines = Vec::new();
     let err = |e: std::io::Error| e.to_string();
+    // Resolved before anything is copied, so a failed install leaves the home as it was.
+    let unixbin = if cfg!(windows) {
+        // The mod's exec() takes no environment and resolves bare names through the app's PATH, which a stock Git for Windows does not extend.
+        let missing = || format!("no env.exe beside {}: install Git for Windows, or set COCKPIT_SH to its sh.exe", shell.display());
+        Some(unix_bin(shell).ok_or_else(missing)?)
+    } else {
+        None
+    };
     for name in ["cockpit.json", "cockpit.svg"] {
         place(&from.join("layouts").join(name), &home.join("layouts").join(name), link).map_err(err)?;
     }
@@ -300,7 +341,10 @@ pub fn install(from: &Path, home: &Path, link: bool) -> Result<Vec<String>, Stri
     // COCKPIT_* variables set for the install (a sandbox's test hooks) go to every cockpit command the mod runs.
     let env: Map<String, Value> =
         std::env::vars().filter(|(k, _)| k.starts_with("COCKPIT_") && k != "COCKPIT_FRONTEND").map(|(k, v)| (k, Value::from(v))).collect();
-    let info = json!({"bin": exe, "cache": files::cache(), "home": files::home(), "version": env!("CARGO_PKG_VERSION"), "env": env});
+    let mut info = json!({"bin": exe, "cache": files::cache(), "home": files::home(), "version": env!("CARGO_PKG_VERSION"), "env": env});
+    if let Some(unixbin) = &unixbin {
+        info["unixbin"] = json!(unixbin);
+    }
     files::write(&home.join("cockpit.json"), &info).map_err(err)?;
     let (keys, skipped) = merge_keys(&files::load(&home.join("keys.json")).unwrap_or(json!({})), &files::load(&from.join("keys.json")).unwrap_or(json!({})));
     files::write(&home.join("keys.json"), &keys).map_err(err)?;
@@ -308,6 +352,12 @@ pub fn install(from: &Path, home: &Path, link: bool) -> Result<Vec<String>, Stri
         lines.push(format!("kept your {key} in {section} ({theirs}): bind a cockpit key there yourself if you want one"));
     }
     Ok(lines)
+}
+
+/// The folder holding `env.exe`: beside `shell`, or in `usr/bin` of the Git folder when the shell is its `bin/sh.exe`.
+fn unix_bin(shell: &Path) -> Option<PathBuf> {
+    let dir = shell.parent()?;
+    [dir.to_path_buf(), dir.join("../usr/bin")].into_iter().find(|d| d.join("env.exe").is_file())
 }
 
 /// The person's keys with cockpit's added; a key they already bind to something else stays theirs: (section, key,
@@ -346,6 +396,40 @@ mod tests {
     }
 
     #[test]
+    fn the_unix_tools_folder_is_the_shells_when_env_is_beside_it() {
+        let dir = std::env::temp_dir().join(format!("cockpit-unixbin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(unix_bin(&dir.join("sh.exe")), None);
+        std::fs::write(dir.join("env.exe"), "").unwrap();
+        assert_eq!(unix_bin(&dir.join("sh.exe")), Some(dir.clone()));
+        let git = dir.join("git");
+        std::fs::create_dir_all(git.join("bin")).unwrap();
+        std::fs::create_dir_all(git.join("usr/bin")).unwrap();
+        assert_eq!(unix_bin(&git.join("bin/sh.exe")), None);
+        std::fs::write(git.join("usr/bin/env.exe"), "").unwrap();
+        assert_eq!(unix_bin(&git.join("bin/sh.exe")), Some(git.join("bin/../usr/bin")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_linked_file_follows_edits_to_its_source_in_place() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (dir.path().join("from.json"), dir.path().join("deep/to.json"));
+        std::fs::write(&from, "one").unwrap();
+        place(&from, &to, true).unwrap();
+        std::fs::OpenOptions::new().append(true).open(&from).unwrap().write_all(b"+two").unwrap();
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "one+two");
+        // A source replaced by a new file leaves the link on the old content; placing again links the new one.
+        std::fs::remove_file(&from).unwrap();
+        std::fs::write(&from, "three").unwrap();
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "one+two");
+        place(&from, &to, true).unwrap();
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "three");
+    }
+
+    #[test]
     fn installs_the_layout_and_mod_and_says_where_cockpit_is() {
         let from = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
@@ -367,5 +451,13 @@ mod tests {
         assert_eq!(files::load(&home.path().join("keys.json")).unwrap()["global"]["cmd-k"], "cockpit.palette");
         install(from.path(), home.path(), false).unwrap();
         assert!(!std::fs::symlink_metadata(home.path().join("mods/cockpit/ui.js")).unwrap().file_type().is_symlink());
+
+        #[cfg(windows)]
+        {
+            let fresh = tempfile::tempdir().unwrap();
+            let failed = install_with(from.path(), fresh.path(), false, &fresh.path().join("nosh/sh.exe"));
+            assert!(failed.unwrap_err().contains("no env.exe"));
+            assert_eq!(std::fs::read_dir(fresh.path()).unwrap().count(), 0, "a failed install leaves the home untouched");
+        }
     }
 }

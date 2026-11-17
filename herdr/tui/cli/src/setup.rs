@@ -1,6 +1,7 @@
 //! `cockpit setup`: /cockpit:setup in the terminal, for any agent: the frontends, default agent and features written
 //! to ~/.config/cockpit/config.json, then herdr, the Herdr app and the other agents wired, each step asked first.
 
+use cockpit_core::platform;
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -40,7 +41,10 @@ impl Io {
 
     /// An answer not shown as it is typed, when the input is a terminal.
     fn secret(&mut self, question: &str) -> String {
+        #[cfg(unix)]
         let echo = Echo::off();
+        #[cfg(windows)]
+        let echo = platform::EchoOff::on_stdin();
         let said = self.ask(question, "");
         drop(echo);
         said
@@ -48,8 +52,10 @@ impl Io {
 }
 
 /// The terminal's echo, off while it lives.
+#[cfg(unix)]
 struct Echo(Option<libc::termios>);
 
+#[cfg(unix)]
 impl Echo {
     fn off() -> Echo {
         // SAFETY: termios calls on stdin with a zeroed struct the call fills.
@@ -66,6 +72,7 @@ impl Echo {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Echo {
     fn drop(&mut self) {
         if let Some(before) = self.0 {
@@ -587,10 +594,9 @@ fn numbers(answer: &str, most: u32) -> Vec<char> {
 }
 
 fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let tmp = path.with_file_name(format!(".{}.tmp", path.file_name().unwrap_or_default().to_string_lossy()));
-    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    let mut file = platform::private_file(std::fs::OpenOptions::new().write(true).create(true).truncate(true)).open(&tmp)?;
+    platform::set_mode(&tmp, 0o600)?;
     file.write_all(text.as_bytes())?;
     std::fs::rename(&tmp, path)
 }
@@ -599,6 +605,7 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn the_config_is_its_owners_alone() {
         use std::os::unix::fs::PermissionsExt;
@@ -610,6 +617,12 @@ mod tests {
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"github\": {\"token\": \"x\"}}");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "no temporary file left");
+    }
+
+    #[test]
+    fn a_secret_read_from_a_pipe_loses_its_line_ending() {
+        let mut io = Io { lines: Box::new(vec!["ghp_token\r".to_string()].into_iter()) };
+        assert_eq!(io.secret("Token?"), "ghp_token");
     }
 
     #[test]
