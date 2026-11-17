@@ -466,6 +466,24 @@ where
     command
 }
 
+/// `path` with the folder of `shell()` appended when it is missing, so a script finds `sleep`, `cat` and the other MSYS
+/// tools a stock Git for Windows keeps off PATH. On Unix it returns `path` unchanged.
+pub fn path_with_unix_tools(path: &std::ffi::OsStr) -> std::ffi::OsString {
+    #[cfg(windows)]
+    {
+        let shell = shell();
+        let Some(dir) = shell.parent().filter(|d| !d.as_os_str().is_empty()) else { return path.to_owned() };
+        let mut dirs: Vec<PathBuf> = std::env::split_paths(path).collect();
+        if dirs.iter().any(|d| d.as_os_str().eq_ignore_ascii_case(dir.as_os_str())) {
+            return path.to_owned();
+        }
+        dirs.push(dir.to_path_buf());
+        std::env::join_paths(dirs).unwrap_or_else(|_| path.to_owned())
+    }
+    #[cfg(unix)]
+    path.to_owned()
+}
+
 /// The shell to run scripts with. On Windows it is the MSYS `sh`: pass its arguments through `args`, never `arg` or `args`.
 pub fn shell() -> PathBuf {
     #[cfg(unix)]
@@ -760,6 +778,7 @@ mod tests {
             let body = format!("sleep 60 & cat /proc/$!/winpid > {}; sleep 60", file.to_string_lossy().replace('\\', "/"));
             let mut cmd = Command::new(shell());
             args(&mut cmd, ["-c", &body]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+            cmd.env("PATH", path_with_unix_tools(&std::env::var_os("PATH").unwrap_or_default()));
             let mut child = spawn_in_job(&mut cmd).unwrap();
             let run = u64::from(child.id());
             let started = std::time::Instant::now();

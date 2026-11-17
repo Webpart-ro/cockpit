@@ -117,6 +117,9 @@ fn main() {
         }
         Err(why) => proc::fail(&why),
     };
+    // Every script cockpit and its hub run through `sh` inherits this PATH, so it finds the MSYS tools on Windows too.
+    let path = platform::path_with_unix_tools(&std::env::var_os("PATH").unwrap_or_default());
+    unsafe { std::env::set_var("PATH", path) };
     let Some((command, rest)) = args.split_first() else { proc::fail(USAGE) };
     // Asking for help is not a mistake: it answers on stdout and exits 0, whole or for one command.
     if matches!(command.as_str(), "--help" | "-h" | "help") {
